@@ -1,8 +1,6 @@
 package dns
 
 import (
-	"time"
-
 	"github.com/jeessy2/ddns-go/v6/config"
 	"github.com/jeessy2/ddns-go/v6/util"
 )
@@ -17,33 +15,14 @@ type DNS interface {
 var (
 	Addresses = []string{
 		alidnsEndpoint,
-		aliesaEndpoint,
-		baiduEndpoint,
 		zonesAPI,
 		recordListAPI,
 		huaweicloudEndpoint,
-		nameCheapEndpoint,
-		nameSiloListRecordEndpoint,
-		porkbunEndpoint,
 		tencentCloudEndPoint,
-		dynadotEndpoint,
-		dynv6Endpoint,
-		gcoreAPIEndpoint,
-		edgeoneEndPoint,
-		rainyunEndpoint,
-		CloudnsEndpoint,
 	}
 
 	Ipcache = [][2]util.IpCache{}
 )
-
-// RunTimer 定时运行
-func RunTimer(delay time.Duration) {
-	for {
-		RunOnce()
-		time.Sleep(delay)
-	}
-}
 
 // RunOnce RunOnce
 func RunOnce() {
@@ -63,60 +42,16 @@ func RunOnce() {
 		switch dc.DNS.Name {
 		case "alidns":
 			dnsSelected = &Alidns{}
-		case "aliesa":
-			dnsSelected = &Aliesa{}
 		case "tencentcloud":
 			dnsSelected = &TencentCloud{}
-		case "trafficroute":
-			dnsSelected = &TrafficRoute{}
 		case "dnspod":
 			dnsSelected = &Dnspod{}
-		case "dnsla":
-			dnsSelected = &Dnsla{}
 		case "cloudflare":
 			dnsSelected = &Cloudflare{}
 		case "huaweicloud":
 			dnsSelected = &Huaweicloud{}
 		case "callback":
 			dnsSelected = &Callback{}
-		case "baiducloud":
-			dnsSelected = &BaiduCloud{}
-		case "porkbun":
-			dnsSelected = &Porkbun{}
-		case "godaddy":
-			dnsSelected = &GoDaddyDNS{}
-		case "namecheap":
-			dnsSelected = &NameCheap{}
-		case "namesilo":
-			dnsSelected = &NameSilo{}
-		case "vercel":
-			dnsSelected = &Vercel{}
-		case "dynadot":
-			dnsSelected = &Dynadot{}
-		case "dynv6":
-			dnsSelected = &Dynv6{}
-		case "spaceship":
-			dnsSelected = &Spaceship{}
-		case "nowcn":
-			dnsSelected = &Nowcn{}
-		case "eranet":
-			dnsSelected = &Eranet{}
-		case "tnethk":
-			dnsSelected = &Tnethk{}
-		case "gcore":
-			dnsSelected = &Gcore{}
-		case "edgeone":
-			dnsSelected = &EdgeOne{}
-		case "nsone":
-			dnsSelected = &NSOne{}
-		case "name_com":
-			dnsSelected = &NameCom{}
-		case "rainyun":
-			dnsSelected = &Rainyun{}
-		case "hipmdnsmgr":
-			dnsSelected = &HiPMDnsMgr{}
-		case "cloudns":
-			dnsSelected = &ClouDNS{}
 		default:
 			dnsSelected = &Alidns{}
 		}

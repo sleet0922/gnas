@@ -22,8 +22,7 @@ func tencentCloudHmacsha256(s, key string) string {
 }
 
 const (
-	DnsPod  = "dnspod"
-	EdgeOne = "teo"
+	DnsPod = "dnspod"
 )
 
 // TencentCloudSigner 腾讯云签名方法 v3 https://cloud.tencent.com/document/api/1427/56189#Golang

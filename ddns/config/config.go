@@ -194,24 +194,6 @@ func (conf *Config) SaveConfig() (err error) {
 	return
 }
 
-// 重置密码
-func (conf *Config) ResetPassword(newPassword string) {
-	// 初始化语言
-	util.InitLogLang(conf.Lang)
-
-	// 先检查密码是否安全
-	hashedPwd, err := conf.CheckPassword(newPassword)
-	if err != nil {
-		util.Log(err.Error())
-		return
-	}
-
-	// 保存配置
-	conf.Password = hashedPwd
-	conf.SaveConfig()
-	util.Log("用户名 %s 的密码已重置成功! 请重启ddns-go", conf.Username)
-}
-
 // CheckPassword 检查密码
 func (conf *Config) CheckPassword(newPassword string) (hashedPwd string, err error) {
 	var minEntropyBits float64 = 30

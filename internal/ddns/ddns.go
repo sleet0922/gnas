@@ -100,35 +100,13 @@ func ForceCompare() {
 
 // DNS 提供商列表
 var DNSProviders = []struct {
-	Name string
+	Name  string
 	Label string
 }{
 	{"alidns", "阿里云"},
-	{"aliesa", "阿里云 ESA"},
 	{"tencentcloud", "腾讯云"},
 	{"dnspod", "Dnspod"},
 	{"cloudflare", "Cloudflare"},
 	{"huaweicloud", "华为云"},
 	{"callback", "Callback"},
-	{"baiducloud", "百度云"},
-	{"porkbun", "Porkbun"},
-	{"godaddy", "GoDaddy"},
-	{"namecheap", "Namecheap"},
-	{"namesilo", "NameSilo"},
-	{"dynadot", "Dynadot"},
-	{"vercel", "Vercel"},
-	{"dynv6", "Dynv6"},
-	{"spaceship", "Spaceship"},
-	{"nowcn", "Nowcn"},
-	{"eranet", "Eranet"},
-	{"tnethk", "Tnethk"},
-	{"gcore", "Gcore"},
-	{"edgeone", "EdgeOne"},
-	{"nsone", "IBM NS1 Connect"},
-	{"rainyun", "雨云"},
-	{"hipmdnsmgr", "HiPMDnsMgr"},
-	{"cloudns", "ClouDNS"},
-	{"dnsla", "DNSLA"},
-	{"trafficroute", "TrafficRoute"},
-	{"name_com", "Name.com"},
 }
