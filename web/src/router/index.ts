@@ -4,6 +4,7 @@ import FilesPage from '@/pages/FilesPage.vue'
 import GalleryPage from '@/pages/GalleryPage.vue'
 import SystemPage from '@/pages/SystemPage.vue'
 import LogsPage from '@/pages/LogsPage.vue'
+import DuplicatesPage from '@/pages/DuplicatesPage.vue'
 import { getToken } from '@/composables/useApi'
 
 const router = createRouter({
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/files', name: 'files', component: FilesPage },
     { path: '/gallery', name: 'gallery', component: GalleryPage },
     { path: '/system', name: 'system', component: SystemPage },
+    { path: '/duplicates', name: 'duplicates', component: DuplicatesPage },
     { path: '/logs', name: 'logs', component: LogsPage },
     { path: '/:pathMatch(.*)*', redirect: '/files' },
   ],

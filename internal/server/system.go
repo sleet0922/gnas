@@ -1,13 +1,18 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
+
+	"github.com/jeessy2/gnas/internal/db"
 )
 
 // SystemInfo 系统信息
@@ -183,4 +188,60 @@ func formatBytes(bytes uint64) string {
 		i++
 	}
 	return fmt.Sprintf("%.1f %s", size, units[i])
+}
+
+// HandleGetSettings 获取系统设置
+func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
+	aiEnabled, err := db.GetSetting("ai_enabled")
+	if err != nil {
+		writeError(w, "获取配置失败")
+		return
+	}
+	
+	enabled := false
+	if aiEnabled == "true" {
+		enabled = true
+	}
+	
+	writeOK(w, map[string]interface{}{
+		"ai_enabled": enabled,
+	})
+}
+
+// HandleUpdateSettings 更新系统设置
+func HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		AIEnabled bool `json:"ai_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, "解析请求参数失败")
+		return
+	}
+	
+	val := "false"
+	if payload.AIEnabled {
+		val = "true"
+	}
+	
+	// 保存设置
+	if err := db.SetSetting("ai_enabled", val); err != nil {
+		writeError(w, "保存配置失败")
+		return
+	}
+	
+	// 动态启动/关闭 AI 后台服务
+	if payload.AIEnabled {
+		log.Println("[设置] AI 功能被启用，触发依赖检测与服务启动...")
+		CheckAndInstallAI()
+	} else {
+		log.Println("[设置] AI 功能被禁用，正在停止后台模型服务以释放内存...")
+		go func() {
+			// 关闭 Python 向量服务器
+			exec.Command("pkill", "-f", "embed_server.py").Run()
+			// 关闭 Qdrant
+			exec.Command("pkill", "qdrant").Run()
+		}()
+	}
+	
+	writeOK(w, nil)
 }

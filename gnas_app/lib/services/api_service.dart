@@ -341,4 +341,42 @@ class ApiService {
           .toList(),
     );
   }
+
+  // -- Settings & AI --
+  Future<ApiResponse<Map<String, dynamic>>> getSettings() async {
+    return _request<Map<String, dynamic>>(
+      () => http.get(Uri.parse('$_baseUrl/api/settings'), headers: _authHeaders),
+      (d) => d as Map<String, dynamic>,
+    );
+  }
+
+  Future<ApiResponse<void>> updateSettings(bool aiEnabled) async {
+    return _request<void>(
+      () => http.post(
+        Uri.parse('$_baseUrl/api/settings/update'),
+        headers: _jsonHeaders,
+        body: jsonEncode({'ai_enabled': aiEnabled}),
+      ),
+      (_) {},
+    );
+  }
+
+  Future<ApiResponse<List<MediaItem>>> searchGallery(String query) async {
+    return _request<List<MediaItem>>(
+      () => http.get(
+        Uri.parse('$_baseUrl/api/search?q=${Uri.encodeComponent(query)}'),
+        headers: _authHeaders,
+      ),
+      (d) => (d as List<dynamic>)
+          .map((e) => MediaItem.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  Future<ApiResponse<List<dynamic>>> getDuplicates() async {
+    return _request<List<dynamic>>(
+      () => http.get(Uri.parse('$_baseUrl/api/gallery/duplicates'), headers: _authHeaders),
+      (d) => d as List<dynamic>,
+    );
+  }
 }

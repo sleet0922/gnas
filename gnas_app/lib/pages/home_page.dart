@@ -3,6 +3,7 @@ import 'dashboard_page.dart';
 import 'files_page.dart';
 import 'gallery_page.dart';
 import 'settings_page.dart';
+import 'duplicates_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -16,6 +17,7 @@ class _HomePageState extends State<HomePage> {
 
   final List<Widget> _pages = const [
     GalleryPage(),
+    DuplicatesPage(),
     FilesPage(),
     DashboardPage(),
     SettingsPage(),
@@ -39,6 +41,11 @@ class _HomePageState extends State<HomePage> {
             icon: Icon(Icons.photo_library_outlined),
             selectedIcon: Icon(Icons.photo_library),
             label: '相册',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.copy_outlined),
+            selectedIcon: Icon(Icons.copy),
+            label: '查重',
           ),
           NavigationDestination(
             icon: Icon(Icons.folder_outlined),

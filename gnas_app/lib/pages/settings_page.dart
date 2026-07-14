@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 import 'change_password_page.dart';
-import 'config_page.dart';
 import 'login_page.dart';
 import 'logs_page.dart';
 
@@ -15,9 +14,50 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage>
     with AutomaticKeepAliveClientMixin {
   final _api = ApiService();
+  bool _aiEnabled = false;
+  bool _loadingSetting = true;
 
   @override
   bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final res = await _api.getSettings();
+    if (!mounted) return;
+    if (res.isSuccess) {
+      setState(() {
+        _aiEnabled = res.data?['ai_enabled'] == true;
+        _loadingSetting = false;
+      });
+    } else {
+      setState(() => _loadingSetting = false);
+    }
+  }
+
+  Future<void> _toggleAI(bool val) async {
+    setState(() => _loadingSetting = true);
+    final res = await _api.updateSettings(val);
+    if (!mounted) return;
+    if (res.isSuccess) {
+      setState(() {
+        _aiEnabled = val;
+        _loadingSetting = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(val ? 'AI 服务正在拉起，后台正配置大模型依赖...' : '已关闭 AI 服务以释放内存')),
+      );
+    } else {
+      setState(() => _loadingSetting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(res.message ?? '更新设置失败')),
+      );
+    }
+  }
 
   Future<void> _logout() async {
     final nav = Navigator.of(context);
@@ -139,6 +179,39 @@ class _SettingsPageState extends State<SettingsPage>
                 onTap: _logout,
               ),
             ],
+          ),
+        ),
+        const SizedBox(height: 24),
+        // AI Section
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Text(
+            'AI 智能功能',
+            style: theme.textTheme.titleSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          child: SwitchListTile(
+            secondary: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primaryContainer,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(
+                Icons.psychology,
+                size: 18,
+                color: theme.colorScheme.onPrimaryContainer,
+              ),
+            ),
+            title: const Text('启用 AI 搜索与图片查重'),
+            subtitle: const Text('自动开启向量数据库与大模型以支持语义搜索及相似照片查重'),
+            value: _aiEnabled,
+            onChanged: _loadingSetting ? null : _toggleAI,
           ),
         ),
         const SizedBox(height: 24),

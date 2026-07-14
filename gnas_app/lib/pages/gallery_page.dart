@@ -18,13 +18,46 @@ class _GalleryPageState extends State<GalleryPage>
   bool _loading = true;
   String? _error;
 
+  bool _aiEnabled = false;
+  final TextEditingController _searchController = TextEditingController();
+
   @override
   bool get wantKeepAlive => true;
 
   @override
   void initState() {
     super.initState();
+    _checkAISettings();
     _loadGallery();
+  }
+
+  Future<void> _checkAISettings() async {
+    final res = await _api.getSettings();
+    if (res.isSuccess) {
+      setState(() {
+        _aiEnabled = res.data?['ai_enabled'] == true;
+      });
+    }
+  }
+
+  Future<void> _searchGallery(String query) async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    final res = await _api.searchGallery(query);
+    if (!mounted) return;
+    if (res.isSuccess && res.data != null) {
+      setState(() {
+        _items = res.data!;
+        _loading = false;
+      });
+    } else {
+      setState(() {
+        _error = res.message ?? '搜索失败';
+        _loading = false;
+      });
+    }
   }
 
   Future<void> _loadGallery() async {
@@ -101,12 +134,11 @@ class _GalleryPageState extends State<GalleryPage>
     super.build(context);
     final theme = Theme.of(context);
 
+    Widget content;
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (_error != null) {
-      return Center(
+      content = const Center(child: CircularProgressIndicator());
+    } else if (_error != null) {
+      content = Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -121,10 +153,8 @@ class _GalleryPageState extends State<GalleryPage>
           ],
         ),
       );
-    }
-
-    if (_items.isEmpty) {
-      return Center(
+    } else if (_items.isEmpty) {
+      content = Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -138,75 +168,122 @@ class _GalleryPageState extends State<GalleryPage>
           ],
         ),
       );
-    }
-
-    return Stack(
-      children: [
-        RefreshIndicator(
-          onRefresh: _loadGallery,
-          child: LayoutBuilder(
-            builder: (_, constraints) {
-              final crossAxisCount = constraints.maxWidth > 600 ? 4 : 3;
-              return GridView.builder(
-                padding: const EdgeInsets.all(4),
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: crossAxisCount,
-                  crossAxisSpacing: 2,
-                  mainAxisSpacing: 2,
-                ),
-                itemCount: _items.length,
-                itemBuilder: (_, i) {
-                  final item = _items[i];
-                  return GestureDetector(
-                    onTap: () => _preview(context, item),
-                    onLongPress: () => _deleteItem(item),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        // Try thumbnail for both images and videos
-                        Image.network(
-                          _api.getThumbUrl(item.path),
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => _placeholder(item),
-                        ),
-                        if (item.isVideo)
-                          const Center(
-                            child: SizedBox(
-                              width: 48,
-                              height: 48,
-                              child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                  color: Colors.black54,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Icon(
-                                  Icons.play_arrow,
-                                  color: Colors.white,
-                                  size: 32,
-                                ),
+    } else {
+      content = RefreshIndicator(
+        onRefresh: _loadGallery,
+        child: LayoutBuilder(
+          builder: (_, constraints) {
+            final crossAxisCount = constraints.maxWidth > 600 ? 4 : 3;
+            return GridView.builder(
+              padding: const EdgeInsets.all(4),
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: crossAxisCount,
+                crossAxisSpacing: 2,
+                mainAxisSpacing: 2,
+              ),
+              itemCount: _items.length,
+              itemBuilder: (_, i) {
+                final item = _items[i];
+                return GestureDetector(
+                  onTap: () => _preview(context, item),
+                  onLongPress: () => _deleteItem(item),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // Try thumbnail for both images and videos
+                      Image.network(
+                        _api.getThumbUrl(item.path),
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => _placeholder(item),
+                      ),
+                      if (item.isVideo)
+                        const Center(
+                          child: SizedBox(
+                            width: 48,
+                            height: 48,
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(
+                                Icons.play_arrow,
+                                color: Colors.white,
+                                size: 32,
                               ),
                             ),
                           ),
-                      ],
-                    ),
-                  );
-                },
-              );
+                        ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('相册'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () {
+              _searchController.clear();
+              _loadGallery();
             },
           ),
-        ),
-        // Upload button at bottom-right
-        Positioned(
-          bottom: 16,
-          right: 16,
-          child: FloatingActionButton.small(
-            heroTag: 'gallery_upload',
-            onPressed: _uploadMedia,
-            tooltip: '上传媒体文件',
-            child: const Icon(Icons.upload),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: _aiEnabled ? '智能多模态搜索...' : '智能搜索未开启 (请在设置中开启)',
+                enabled: _aiEnabled,
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _searchController.text.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () {
+                          _searchController.clear();
+                          _loadGallery();
+                        },
+                      )
+                    : null,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(28),
+                  borderSide: BorderSide.none,
+                ),
+                filled: true,
+                fillColor: theme.colorScheme.surfaceVariant.withOpacity(0.5),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+              ),
+              textInputAction: TextInputAction.search,
+              onSubmitted: (val) {
+                if (val.trim().isNotEmpty) {
+                  _searchGallery(val.trim());
+                }
+              },
+              onChanged: (val) {
+                setState(() {});
+              },
+            ),
           ),
-        ),
-      ],
+          Expanded(child: content),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.small(
+        heroTag: 'gallery_upload',
+        onPressed: _uploadMedia,
+        tooltip: '上传媒体文件',
+        child: const Icon(Icons.upload),
+      ),
     );
   }
 

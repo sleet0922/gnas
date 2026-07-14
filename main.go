@@ -21,8 +21,7 @@ import (
 var webDist embed.FS
 
 var (
-	listenAddr   = flag.String("l", ":8080", "监听地址")
-	dataDirFlag  = flag.String("data", "/var/lib/gnas", "数据目录")
+	listenAddr = flag.String("l", ":8080", "监听地址")
 )
 
 var version = "DEV"
@@ -30,10 +29,13 @@ var version = "DEV"
 func main() {
 	flag.Parse()
 
-	// 初始化数据目录
-	dataDir := *dataDirFlag
+	// 初始化数据目录 (硬编码为 /var/lib/gnas)
+	dataDir := "/var/lib/gnas"
 	os.MkdirAll(dataDir, 0755)
 	server.InitDataDir(dataDir)
+
+	// 检查并安装 ffmpeg
+	server.CheckAndInstallFFmpeg()
 
 	// 初始化 SQLite 数据库
 	dbPath := filepath.Join(dataDir, "gnas.db")
@@ -41,6 +43,9 @@ func main() {
 		log.Fatalf("初始化数据库失败: %v", err)
 	}
 	defer db.Close()
+
+	// 检查并安装 AI 依赖 (Ollama, Qdrant)
+	server.CheckAndInstallAI()
 
 	// 启动 HTTP 服务
 	if err := startHTTPServer(); err != nil {
@@ -84,9 +89,13 @@ func startHTTPServer() error {
 	mux.HandleFunc("/api/files/batch-delete", protectedAPI(server.HandleFileBatchDelete))
 	mux.HandleFunc("/api/files/mkdir", protectedAPI(server.HandleFileMkdir))
 	mux.HandleFunc("/api/files/rename", protectedAPI(server.HandleFileRename))
+	mux.HandleFunc("/api/search", protectedAPI(server.HandleSearchPhotos))
+	mux.HandleFunc("/api/gallery/duplicates", protectedAPI(server.HandleGalleryDuplicates))
 
-	// 系统信息 API
+	// 系统信息与设置 API
 	mux.HandleFunc("/api/system", protectedAPI(server.HandleSystemInfo))
+	mux.HandleFunc("/api/settings", protectedAPI(server.HandleGetSettings))
+	mux.HandleFunc("/api/settings/update", protectedAPI(server.HandleUpdateSettings))
 
 	// 静态文件服务
 	distFS, err := fs.Sub(webDist, "web/dist")

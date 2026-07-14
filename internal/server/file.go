@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +26,18 @@ import (
 
 // 文件管理根目录，默认为可执行文件同目录下的 data
 var dataDir string
+
+var systemExcludes = map[string]bool{
+	"modelscope_cache": true,
+	"qwen3_env":        true,
+	"qwen3_vl_ov":      true,
+	"tmp":              true,
+	"embed_server.log": true,
+	"embed_server.py":  true,
+	"gnas.db":          true,
+	"gnas.db-journal":  true,
+	"gnas.db-wal":      true,
+}
 
 func InitDataDir(dir string) {
 	dataDir = dir
@@ -57,6 +70,8 @@ func generateThumbForFile(absPath string) {
 			log.Printf("[缩略图] 生成图片缩略图失败 %s: %v", name, err)
 		} else {
 			log.Printf("[缩略图] 已生成图片缩略图: %s", name)
+			// 生成图片缩略图后，也生成特征向量存入 Qdrant
+			go generateImageEmbedding(absPath)
 		}
 	} else if isVideoExt(name) {
 		if _, err := generateVideoThumbnail(absPath); err != nil {
@@ -73,11 +88,14 @@ func GenerateAllThumbnails() {
 	generated := 0
 	skipped := 0
 	filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return nil
 		}
-		// 跳过缩略图缓存目录和数据库
-		if strings.Contains(path, ".thumbs") || strings.Contains(path, "gnas.db") {
+		if d.IsDir() {
+			name := d.Name()
+			if strings.HasPrefix(name, ".") || systemExcludes[name] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		name := d.Name()
@@ -105,6 +123,17 @@ func safePath(name string) (string, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("非法路径")
 	}
+	
+	// 限制防越权：拒绝访问系统专有文件夹/隐藏文件
+	if rel != "." {
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		for _, part := range parts {
+			if strings.HasPrefix(part, ".") || systemExcludes[part] {
+				return "", fmt.Errorf("非法路径")
+			}
+		}
+	}
+	
 	return abs, nil
 }
 
@@ -153,9 +182,9 @@ func HandleFileList(w http.ResponseWriter, r *http.Request) {
 
 	var files []FileInfo
 	for _, entry := range entries {
-		// 跳过隐藏目录、缩略图缓存、数据库文件
+		// 跳过隐藏目录、系统排除目录与文件（如大模型缓存与运行环境）
 		name := entry.Name()
-		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "gnas.db") {
+		if strings.HasPrefix(name, ".") || systemExcludes[name] {
 			continue
 		}
 		info, err := entry.Info()
@@ -344,11 +373,14 @@ type MediaItem struct {
 func HandleGalleryList(w http.ResponseWriter, r *http.Request) {
 	var items []MediaItem
 	filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return nil
 		}
-		// 跳过缩略图缓存目录
-		if strings.Contains(path, ".thumbs") {
+		if d.IsDir() {
+			name := d.Name()
+			if strings.HasPrefix(name, ".") || systemExcludes[name] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		name := d.Name()
@@ -794,3 +826,44 @@ func HandleFileRename(w http.ResponseWriter, r *http.Request) {
 
 	writeOK(w, nil)
 }
+
+// CheckAndInstallFFmpeg 检查 ffmpeg 是否存在，若不存在且在 linux 下且有 apt-get 则自动安装
+func CheckAndInstallFFmpeg() {
+	_, err := exec.LookPath("ffmpeg")
+	if err == nil {
+		log.Println("ffmpeg 已存在，无需自动安装")
+		return
+	}
+
+	if runtime.GOOS != "linux" {
+		log.Printf("ffmpeg 未找到，但当前系统为 %s，无法自动执行 apt 安装", runtime.GOOS)
+		return
+	}
+
+	aptPath, err := exec.LookPath("apt-get")
+	if err != nil {
+		log.Println("ffmpeg 未找到，且未检测到 apt-get，无法自动安装")
+		return
+	}
+
+	log.Println("检测到 ffmpeg 不存在，正在自动通过 apt 安装 ffmpeg...")
+	go func() {
+		// 执行 apt-get update
+		log.Println("[APT] 正在执行 apt-get update...")
+		updateCmd := exec.Command(aptPath, "update")
+		if output, err := updateCmd.CombinedOutput(); err != nil {
+			log.Printf("[APT] apt-get update 失败: %v, output: %s", err, string(output))
+			return
+		}
+
+		// 执行 apt-get install -y ffmpeg
+		log.Println("[APT] 正在执行 apt-get install -y ffmpeg...")
+		installCmd := exec.Command(aptPath, "install", "-y", "ffmpeg")
+		if output, err := installCmd.CombinedOutput(); err != nil {
+			log.Printf("[APT] apt-get install ffmpeg 失败: %v, output: %s", err, string(output))
+			return
+		}
+		log.Println("[APT] ffmpeg 自动安装成功！")
+	}()
+}
+

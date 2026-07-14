@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { apiGet, apiPost, getAuthImageUrl, getAuthDownloadUrl, type MediaItem } from '@/composables/useApi'
 
 const items = ref<MediaItem[]>([])
@@ -20,6 +20,46 @@ const filteredItems = computed(() => {
 
 const imageCount = computed(() => items.value.filter(i => i.type === 'image').length)
 const videoCount = computed(() => items.value.filter(i => i.type === 'video').length)
+
+const searchQuery = ref('')
+const isSearching = ref(false)
+const aiEnabled = ref(false)
+
+async function checkAISettings() {
+  const data = await apiGet<{ ai_enabled: boolean }>('/api/settings')
+  if (data) aiEnabled.value = data.ai_enabled
+}
+
+async function handleSearch() {
+  const query = searchQuery.value?.trim()
+  if (!query) {
+    clearSearch()
+    return
+  }
+  loading.value = true
+  isSearching.value = true
+  try {
+    const data = await apiGet<MediaItem[]>('/api/search?q=' + encodeURIComponent(query))
+    items.value = data || []
+  } catch (e: any) {
+    alert(e.message || '搜索失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function clearSearch() {
+  searchQuery.value = ''
+  isSearching.value = false
+  await loadGallery()
+}
+
+watch(searchQuery, (newVal) => {
+  if (newVal === null || newVal === '') {
+    isSearching.value = false
+    loadGallery()
+  }
+})
 
 async function loadGallery() {
   loading.value = true
@@ -125,14 +165,30 @@ async function confirmBatchDelete() {
 
 onMounted(() => {
   loadGallery()
+  checkAISettings()
   window.addEventListener('keydown', onKeydown)
 })
 </script>
 
 <template>
   <div>
-    <div class="d-flex align-center justify-space-between mb-4">
-      <h1 class="text-h5 font-weight-bold">相册</h1>
+    <div class="d-flex flex-wrap align-center justify-space-between mb-4 ga-2">
+      <div class="d-flex align-center ga-4">
+        <h1 class="text-h5 font-weight-bold">相册</h1>
+        <v-text-field
+          v-model="searchQuery"
+          :placeholder="aiEnabled ? '智能多模态搜索...' : '智能搜索未开启 (请在“占用”中启用)'"
+          :disabled="!aiEnabled"
+          prepend-inner-icon="mdi-magnify"
+          density="compact"
+          variant="outlined"
+          hide-details
+          clearable
+          style="max-width: 300px; min-width: 200px;"
+          @keydown.enter="handleSearch"
+          @click:clear="clearSearch"
+        />
+      </div>
       <div class="d-flex ga-2 align-center">
         <v-chip-group v-model="filter" mandatory>
           <v-chip size="small" value="all" filter>全部 ({{ items.length }})</v-chip>
@@ -150,7 +206,7 @@ onMounted(() => {
         </template>
         <template v-else>
           <v-btn variant="tonal" size="small" prepend-icon="mdi-check-circle-outline" @click="selectMode = true">批量</v-btn>
-          <v-btn variant="tonal" size="small" icon="mdi-refresh" @click="loadGallery" />
+          <v-btn variant="tonal" size="small" icon="mdi-refresh" @click="isSearching ? handleSearch() : loadGallery()" />
         </template>
       </div>
     </div>

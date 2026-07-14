@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { apiGet, type SystemInfo } from '@/composables/useApi'
+import { apiGet, apiPost, type SystemInfo } from '@/composables/useApi'
 
 const info = ref<SystemInfo | null>(null)
 let timer: ReturnType<typeof setInterval>
@@ -45,6 +45,27 @@ const procCPUPercent = computed(() => {
   return info.value.procCPU.toFixed(1)
 })
 
+const aiEnabled = ref(false)
+const updatingSettings = ref(false)
+
+async function loadSettings() {
+  const data = await apiGet<{ ai_enabled: boolean }>('/api/settings')
+  if (data) aiEnabled.value = data.ai_enabled
+}
+
+async function toggleAISettings() {
+  updatingSettings.value = true
+  try {
+    await apiPost('/api/settings/update', { ai_enabled: aiEnabled.value })
+  } catch (e: any) {
+    alert(e.message || '更新设置失败')
+    // 失败时回滚状态
+    aiEnabled.value = !aiEnabled.value
+  } finally {
+    updatingSettings.value = false
+  }
+}
+
 async function loadInfo() {
   const data = await apiGet<SystemInfo>('/api/system')
   if (data) info.value = data
@@ -52,6 +73,7 @@ async function loadInfo() {
 
 onMounted(() => {
   loadInfo()
+  loadSettings()
   timer = setInterval(loadInfo, 3000)
 })
 
@@ -93,6 +115,30 @@ onUnmounted(() => clearInterval(timer))
         </v-card>
       </v-col>
     </v-row>
+
+    <!-- AI 设置 -->
+    <v-card color="surface-variant" class="pa-5 mb-4">
+      <div class="d-flex align-center justify-space-between flex-wrap ga-3">
+        <div style="flex: 1; min-width: 250px;">
+          <div class="d-flex align-center ga-3 mb-1">
+            <v-icon color="primary">mdi-brain</v-icon>
+            <span class="text-subtitle-1 font-weight-bold">AI 智能搜图与图片查重</span>
+          </div>
+          <div class="text-caption text-medium-emphasis">
+            启用后系统将自动安装并运行 Qdrant 向量数据库与 Qwen3 多模态大模型，以提供强大的语义搜索和查重能力（首次启用由于下载模型，可能需要几分钟初始化）。关闭后将自动释放内存资源。
+          </div>
+        </div>
+        <v-switch
+          v-model="aiEnabled"
+          :disabled="updatingSettings"
+          :loading="updatingSettings"
+          color="primary"
+          hide-details
+          inset
+          @change="toggleAISettings"
+        />
+      </div>
+    </v-card>
 
     <!-- 进程资源 -->
     <v-card color="surface-variant" class="pa-5 mb-4">
