@@ -37,6 +37,7 @@ var systemExcludes = map[string]bool{
 	"gnas.db":          true,
 	"gnas.db-journal":  true,
 	"gnas.db-wal":      true,
+	"gnas.db-shm":      true,
 }
 
 func InitDataDir(dir string) {
