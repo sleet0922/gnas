@@ -16,6 +16,7 @@ class ApiService {
   static String _baseUrl = 'http://192.168.1.100:8080';
   static String _token = '';
   static const Duration _timeout = Duration(seconds: 20);
+  static const Duration _archiveTimeout = Duration(minutes: 10);
 
   static final ApiService _instance = ApiService._internal();
   factory ApiService() => _instance;
@@ -255,6 +256,17 @@ class ApiService {
     );
   }
 
+  Future<ApiResponse<Map<String, dynamic>>> flattenFiles(String path) async {
+    return _request<Map<String, dynamic>>(
+      () => http.post(
+        Uri.parse('$_baseUrl/api/files/flatten'),
+        headers: _jsonHeaders,
+        body: jsonEncode({'path': path}),
+      ),
+      (d) => d as Map<String, dynamic>,
+    );
+  }
+
   Future<ApiResponse<void>> uploadFile(String dirPath, File file) async {
     final req = http.MultipartRequest(
       'POST',
@@ -342,10 +354,40 @@ class ApiService {
     );
   }
 
+  Future<http.Response> exportGallery() async {
+    return http
+        .get(Uri.parse('$_baseUrl/api/gallery/export'), headers: _authHeaders)
+        .timeout(_archiveTimeout);
+  }
+
+  Future<ApiResponse<int>> importGallery(File file) async {
+    try {
+      final req = http.MultipartRequest(
+        'POST',
+        Uri.parse('$_baseUrl/api/gallery/import'),
+      );
+      req.headers.addAll(_authHeaders);
+      req.files.add(await http.MultipartFile.fromPath('file', file.path));
+      final streamed = await req.send().timeout(_archiveTimeout);
+      final response = await http.Response.fromStream(streamed);
+      return _parseResponse<int>(
+        response,
+        (d) => (d as Map<String, dynamic>)['imported'] as int? ?? 0,
+      );
+    } on SocketException {
+      return ApiResponse(code: 1, message: 'Unable to connect to server');
+    } on TimeoutException {
+      return ApiResponse(code: 1, message: 'Request timed out');
+    } catch (e) {
+      return ApiResponse(code: 1, message: 'Import failed: $e');
+    }
+  }
+
   // -- Settings & AI --
   Future<ApiResponse<Map<String, dynamic>>> getSettings() async {
     return _request<Map<String, dynamic>>(
-      () => http.get(Uri.parse('$_baseUrl/api/settings'), headers: _authHeaders),
+      () =>
+          http.get(Uri.parse('$_baseUrl/api/settings'), headers: _authHeaders),
       (d) => d as Map<String, dynamic>,
     );
   }
@@ -375,7 +417,10 @@ class ApiService {
 
   Future<ApiResponse<List<dynamic>>> getDuplicates() async {
     return _request<List<dynamic>>(
-      () => http.get(Uri.parse('$_baseUrl/api/gallery/duplicates'), headers: _authHeaders),
+      () => http.get(
+        Uri.parse('$_baseUrl/api/gallery/duplicates'),
+        headers: _authHeaders,
+      ),
       (d) => d as List<dynamic>,
     );
   }

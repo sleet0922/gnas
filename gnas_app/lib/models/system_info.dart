@@ -1,4 +1,5 @@
 class SystemInfo {
+  final AIStatus ai;
   final String os;
   final String arch;
   final int cpuCores;
@@ -17,6 +18,7 @@ class SystemInfo {
   final String dbSizeString;
 
   SystemInfo({
+    required this.ai,
     required this.os,
     required this.arch,
     required this.cpuCores,
@@ -37,6 +39,7 @@ class SystemInfo {
 
   factory SystemInfo.fromJson(Map<String, dynamic> json) {
     return SystemInfo(
+      ai: AIStatus.fromJson(json['ai'] as Map<String, dynamic>? ?? const {}),
       os: json['os'] as String? ?? '',
       arch: json['arch'] as String? ?? '',
       cpuCores: json['cpuCores'] as int? ?? 0,
@@ -81,6 +84,53 @@ class SystemStatus {
     return SystemStatus(
       version: json['version'] as String? ?? '',
       username: json['username'] as String? ?? '',
+    );
+  }
+}
+
+class AIStatus {
+  final bool enabled;
+  final AIServiceStatus model;
+  final AIServiceStatus qdrant;
+
+  const AIStatus({
+    required this.enabled,
+    required this.model,
+    required this.qdrant,
+  });
+
+  factory AIStatus.fromJson(Map<String, dynamic> json) {
+    return AIStatus(
+      enabled: json['enabled'] as bool? ?? false,
+      model: AIServiceStatus.fromJson(
+        json['model'] as Map<String, dynamic>? ?? const {},
+      ),
+      qdrant: AIServiceStatus.fromJson(
+        json['qdrant'] as Map<String, dynamic>? ?? const {},
+      ),
+    );
+  }
+}
+
+class AIServiceStatus {
+  final String status;
+  final String message;
+  final String? version;
+  final String? device;
+
+  const AIServiceStatus({
+    required this.status,
+    required this.message,
+    this.version,
+    this.device,
+  });
+
+  factory AIServiceStatus.fromJson(Map<String, dynamic> json) {
+    return AIServiceStatus(
+      status: json['status'] as String? ?? 'unavailable',
+      message: json['message'] as String? ?? '',
+      version: json['version'] as String?,
+      device: json['device'] as String?,
     );
   }
 }

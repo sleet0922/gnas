@@ -1,12 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	_ "embed"
@@ -17,8 +19,114 @@ import (
 //go:embed embed_server.py
 var embedServerCode string
 
+const (
+	internalStorageDir = ".gnas"
+	modelCacheDir      = "modelscope_cache"
+	envDirName         = "qwen3_env"
+	modelDirName       = "qwen3_vl_ov"
+	tempDirName        = "tmp"
+	logFileName        = "embed_server.log"
+)
+
+func migrateAIStorageDirs() {
+	if err := os.MkdirAll(filepath.Join(dataDir, internalStorageDir), 0755); err != nil {
+		log.Printf("[AI 初始化] 创建内部存储目录失败: %v", err)
+		return
+	}
+
+	// Keep the migration local to dataDir so existing model caches and virtual
+	// environments can be moved without copying or downloading them again.
+	pairs := [][2]string{
+		{thumbnailCacheDirName, ".thumbs"},
+		{modelCacheDir, ".modelscope_cache"},
+		{envDirName, ".qwen3_env"},
+		{modelDirName, ".qwen3_vl_ov"},
+		{tempDirName, ".tmp"},
+		{logFileName, ".embed_server.log"},
+	}
+	for _, pair := range pairs {
+		targetPath := filepath.Join(dataDir, internalStorageDir, pair[0])
+		if _, err := os.Lstat(targetPath); err == nil {
+			continue
+		}
+		legacyNames := []string{pair[1], strings.TrimPrefix(pair[1], ".")}
+		for _, legacyName := range legacyNames {
+			legacyPath := filepath.Join(dataDir, legacyName)
+			if _, err := os.Lstat(legacyPath); err != nil {
+				continue
+			}
+			if err := os.Rename(legacyPath, targetPath); err != nil {
+				log.Printf("[AI 初始化] 内部存储迁移失败 %s -> %s: %v", legacyName, filepath.Join(internalStorageDir, pair[0]), err)
+			} else {
+				log.Printf("[AI 初始化] 已迁移内部存储: %s -> %s", legacyName, filepath.Join(internalStorageDir, pair[0]))
+			}
+			break
+		}
+	}
+	repairVirtualEnvPaths(filepath.Join(dataDir, internalStorageDir, envDirName))
+}
+
+func aiStoragePath(name string) string {
+	return filepath.Join(dataDir, internalStorageDir, name)
+}
+
+func repairVirtualEnvPaths(envPath string) {
+	if _, err := os.Stat(envPath); err != nil {
+		return
+	}
+	targetAbs, err := filepath.Abs(envPath)
+	if err != nil {
+		return
+	}
+	legacyPaths := []string{
+		filepath.Join(dataDir, envDirName),
+		filepath.Join(dataDir, "."+envDirName),
+	}
+	legacyAbs := make([]string, 0, len(legacyPaths)*2)
+	for _, path := range legacyPaths {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		legacyAbs = append(legacyAbs, abs, filepath.ToSlash(abs))
+	}
+	targetSlash := filepath.ToSlash(targetAbs)
+
+	paths := []string{filepath.Join(envPath, "pyvenv.cfg")}
+	binDir := filepath.Join(envPath, "bin")
+	entries, err := os.ReadDir(binDir)
+	if err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				paths = append(paths, filepath.Join(binDir, entry.Name()))
+			}
+		}
+	}
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil || bytes.IndexByte(content, 0) >= 0 {
+			continue
+		}
+		updated := string(content)
+		for i := 0; i < len(legacyAbs); i += 2 {
+			updated = strings.ReplaceAll(updated, legacyAbs[i], targetAbs)
+			updated = strings.ReplaceAll(updated, legacyAbs[i+1], targetSlash)
+		}
+		if updated != string(content) {
+			mode := os.FileMode(0644)
+			if info, err := os.Stat(path); err == nil {
+				mode = info.Mode().Perm()
+			}
+			if err := os.WriteFile(path, []byte(updated), mode); err != nil {
+				log.Printf("[AI 初始化] 修正 Python 虚拟环境路径失败 %s: %v", path, err)
+			}
+		}
+	}
+}
+
 // CheckAndInstallAI 检测并安装 Ollama 和 Qdrant
 func CheckAndInstallAI() {
+	migrateAIStorageDirs()
 	go func() {
 		aiEnabled, err := db.GetSetting("ai_enabled")
 		if err != nil || aiEnabled != "true" {
@@ -41,7 +149,7 @@ func checkAndInstallPythonVLM() {
 	}
 
 	log.Println("[AI 初始化] 准备配置 Python 虚拟环境与多模态向量模型...")
-	
+
 	// 1. 安装系统级 python 依赖
 	aptCmd := exec.Command("apt-get", "install", "-y", "python3-venv", "python3-pip", "python3")
 	if output, err := aptCmd.CombinedOutput(); err != nil {
@@ -49,8 +157,8 @@ func checkAndInstallPythonVLM() {
 		// 继续执行，可能系统已存在
 	}
 
-	envDir := filepath.Join(dataDir, "qwen3_env")
-	modelDir := filepath.Join(dataDir, "qwen3_vl_ov")
+	envDir := aiStoragePath(envDirName)
+	modelDir := aiStoragePath(modelDirName)
 
 	// 2. 创建虚拟环境
 	if _, err := os.Stat(envDir); os.IsNotExist(err) {
@@ -76,7 +184,7 @@ func checkAndInstallPythonVLM() {
 
 	// 4. 安装必要的 Python 依赖包
 	log.Println("[AI 初始化] 正在检测并安装多模态大模型所需依赖包（首次安装需要几分钟）...")
-	tmpDir := filepath.Join(dataDir, "tmp")
+	tmpDir := aiStoragePath(tempDirName)
 	os.MkdirAll(tmpDir, 0755)
 
 	installCmd := exec.Command(pipPath, "install", "--no-cache-dir", "torch", "torchvision", "transformers", "pillow", "fastapi", "uvicorn", "modelscope", "qwen-vl-utils")
@@ -98,10 +206,10 @@ func checkAndInstallPythonVLM() {
 	// 6. 后台启动 FastAPI 服务
 	serverCmd := exec.Command(pythonPath, embedPath)
 	serverCmd.Dir = modelDir
-	serverCmd.Env = append(os.Environ(), "MODELSCOPE_CACHE="+filepath.Join(dataDir, "modelscope_cache"))
-	
+	serverCmd.Env = append(os.Environ(), "MODELSCOPE_CACHE="+aiStoragePath(modelCacheDir))
+
 	// 重定向输出到日志文件
-	logFile, err := os.OpenFile(filepath.Join(dataDir, "embed_server.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	logFile, err := os.OpenFile(aiStoragePath(logFileName), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err == nil {
 		serverCmd.Stdout = logFile
 		serverCmd.Stderr = logFile
@@ -175,7 +283,7 @@ func checkAndInstallQdrant() {
 				qdrantCmd.Wait()
 			}()
 		}
-		
+
 		// 等待启动
 		for i := 0; i < 10; i++ {
 			time.Sleep(2 * time.Second)

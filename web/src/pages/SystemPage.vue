@@ -45,6 +45,24 @@ const procCPUPercent = computed(() => {
   return info.value.procCPU.toFixed(1)
 })
 
+function serviceStatusLabel(status: string): string {
+  switch (status) {
+    case 'ready': return '已就绪'
+    case 'loading': return '加载中'
+    case 'disabled': return '已关闭'
+    default: return '不可用'
+  }
+}
+
+function serviceStatusColor(status: string): string {
+  switch (status) {
+    case 'ready': return 'success'
+    case 'loading': return 'warning'
+    case 'disabled': return 'grey'
+    default: return 'error'
+  }
+}
+
 const aiEnabled = ref(false)
 const updatingSettings = ref(false)
 
@@ -138,6 +156,43 @@ onUnmounted(() => clearInterval(timer))
           @change="toggleAISettings"
         />
       </div>
+    </v-card>
+
+    <v-card color="surface-variant" class="pa-5 mb-4">
+      <div class="d-flex align-center ga-3 mb-4">
+        <v-icon color="primary">mdi-server-network</v-icon>
+        <span class="text-subtitle-1 font-weight-medium">AI 服务状态</span>
+      </div>
+      <v-row>
+        <v-col cols="12" md="6">
+          <div class="d-flex align-center justify-space-between mb-2">
+            <div class="d-flex align-center ga-2">
+              <v-icon size="20">mdi-brain</v-icon>
+              <span class="text-body-2">Qwen3 多模态模型</span>
+            </div>
+            <v-chip size="small" :color="serviceStatusColor(info.ai.model.status)" variant="tonal">
+              {{ serviceStatusLabel(info.ai.model.status) }}
+            </v-chip>
+          </div>
+          <div class="text-caption text-medium-emphasis">
+            {{ info.ai.model.message }}<span v-if="info.ai.model.device"> · 设备 {{ info.ai.model.device }}</span>
+          </div>
+        </v-col>
+        <v-col cols="12" md="6">
+          <div class="d-flex align-center justify-space-between mb-2">
+            <div class="d-flex align-center ga-2">
+              <v-icon size="20">mdi-database-search</v-icon>
+              <span class="text-body-2">Qdrant 向量数据库</span>
+            </div>
+            <v-chip size="small" :color="serviceStatusColor(info.ai.qdrant.status)" variant="tonal">
+              {{ serviceStatusLabel(info.ai.qdrant.status) }}
+            </v-chip>
+          </div>
+          <div class="text-caption text-medium-emphasis">
+            {{ info.ai.qdrant.message }}<span v-if="info.ai.qdrant.version"> · 版本 {{ info.ai.qdrant.version }}</span>
+          </div>
+        </v-col>
+      </v-row>
     </v-card>
 
     <!-- 进程资源 -->

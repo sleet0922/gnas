@@ -188,6 +188,48 @@ class _FilesPageState extends State<FilesPage>
     }
   }
 
+  Future<void> _flatten(FileInfo file) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('拆散文件夹'),
+        content: Text('将“${file.name}”中的所有文件移动到文件根目录，空文件夹会被删除。同名文件不会被覆盖。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确认拆散'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    final res = await _api.flattenFiles(file.path);
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (res.isSuccess) {
+      final moved = res.data?['moved'] ?? 0;
+      messenger.showSnackBar(SnackBar(content: Text('已移动 $moved 个文件')));
+      _loadFiles();
+    } else {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(res.message ?? '拆散文件夹失败'),
+          backgroundColor: Colors.red.shade600,
+        ),
+      );
+    }
+  }
+
+  void _flattenRoot() {
+    _flatten(
+      FileInfo(name: '所有文件夹', path: '/', isDir: true, size: 0, modTime: ''),
+    );
+  }
+
   Future<void> _delete(FileInfo file) async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -318,6 +360,12 @@ class _FilesPageState extends State<FilesPage>
                 onPressed: _loadFiles,
                 tooltip: '刷新',
               ),
+              if (_currentPath == '/')
+                IconButton(
+                  icon: const Icon(Icons.drive_file_move_outline),
+                  onPressed: _flattenRoot,
+                  tooltip: '拆散文件夹',
+                ),
               IconButton(
                 icon: const Icon(Icons.create_new_folder),
                 onPressed: _createDir,
@@ -379,6 +427,8 @@ class _FilesPageState extends State<FilesPage>
                         trailing: PopupMenuButton<String>(
                           onSelected: (v) {
                             switch (v) {
+                              case 'flatten':
+                                _flatten(f);
                               case 'rename':
                                 _rename(f);
                               case 'delete':
@@ -388,6 +438,11 @@ class _FilesPageState extends State<FilesPage>
                             }
                           },
                           itemBuilder: (_) => [
+                            if (f.isDir)
+                              const PopupMenuItem(
+                                value: 'flatten',
+                                child: Text('拆散到根目录'),
+                              ),
                             if (!f.isDir)
                               const PopupMenuItem(
                                 value: 'download',

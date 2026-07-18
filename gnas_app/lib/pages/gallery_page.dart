@@ -1,4 +1,7 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import '../services/api_service.dart';
@@ -129,6 +132,61 @@ class _GalleryPageState extends State<GalleryPage>
     _loadGallery();
   }
 
+  Future<void> _exportGallery() async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('正在导出相册...')));
+    try {
+      final response = await _api.exportGallery();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('导出失败 (${response.statusCode})');
+      }
+      final directory = await getApplicationDocumentsDirectory();
+      final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final output = File('${directory.path}/gnas-gallery-$timestamp.zip');
+      await output.writeAsBytes(response.bodyBytes, flush: true);
+      if (!mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text('导出完成：${output.path}')));
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('导出失败：$e'),
+          backgroundColor: Colors.red.shade600,
+        ),
+      );
+    }
+  }
+
+  Future<void> _importGallery() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['zip'],
+    );
+    final path = result?.files.single.path;
+    if (path == null) return;
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('正在导入相册...')));
+    final response = await _api.importGallery(File(path));
+    if (!mounted) return;
+    if (response.isSuccess) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('导入完成，共 ${response.data ?? 0} 个文件'),
+          backgroundColor: Colors.green.shade600,
+        ),
+      );
+      _loadGallery();
+    } else {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(response.message ?? '导入失败'),
+          backgroundColor: Colors.red.shade600,
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -229,6 +287,16 @@ class _GalleryPageState extends State<GalleryPage>
         title: const Text('相册'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.file_upload_outlined),
+            tooltip: '导入相册 ZIP',
+            onPressed: _importGallery,
+          ),
+          IconButton(
+            icon: const Icon(Icons.file_download_outlined),
+            tooltip: '导出相册 ZIP',
+            onPressed: _exportGallery,
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: () {
               _searchController.clear();
@@ -261,7 +329,9 @@ class _GalleryPageState extends State<GalleryPage>
                   borderSide: BorderSide.none,
                 ),
                 filled: true,
-                fillColor: theme.colorScheme.surfaceVariant.withOpacity(0.5),
+                fillColor: theme.colorScheme.surfaceContainerHighest.withValues(
+                  alpha: 0.5,
+                ),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16),
               ),
               textInputAction: TextInputAction.search,

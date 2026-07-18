@@ -6,6 +6,7 @@
 *.test
 *.out
 gnas
+gnas-linux
 /vendor/
 
 # Config & Data
@@ -51,6 +52,9 @@ Thumbs.db
 
 # Build
 dist/
+!web/dist/
+web/dist/*
+!web/dist/index.html
 build/
 gnas
 

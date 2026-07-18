@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,22 +18,36 @@ import (
 
 // SystemInfo 系统信息
 type SystemInfo struct {
-	OS           string  `json:"os"`
-	Arch         string  `json:"arch"`
-	CPUCores     int     `json:"cpuCores"`
-	MemoryTotal  uint64  `json:"memoryTotal"`
-	MemoryUsed   uint64  `json:"memoryUsed"`
-	MemoryFree   uint64  `json:"memoryFree"`
-	DiskTotal    uint64  `json:"diskTotal"`
-	DiskUsed     uint64  `json:"diskUsed"`
-	DiskFree     uint64  `json:"diskFree"`
-	Uptime       float64 `json:"uptime"`       // 秒
-	ProcMem      uint64  `json:"procMem"`      // 进程内存（Alloc）
-	ProcMemSys   uint64  `json:"procMemSys"`   // 进程从系统获取的内存
-	CPUUsage     float64 `json:"cpuUsage"`     // 系统CPU使用率 0-100
-	ProcCPU      float64 `json:"procCPU"`      // 进程CPU使用率 0-100
-	DBSize       int64   `json:"dbSize"`       // 数据库文件大小
-	DBSizeString string  `json:"dbSizeString"` // 数据库文件大小（格式化）
+	AI           AIStatus `json:"ai"`
+	OS           string   `json:"os"`
+	Arch         string   `json:"arch"`
+	CPUCores     int      `json:"cpuCores"`
+	MemoryTotal  uint64   `json:"memoryTotal"`
+	MemoryUsed   uint64   `json:"memoryUsed"`
+	MemoryFree   uint64   `json:"memoryFree"`
+	DiskTotal    uint64   `json:"diskTotal"`
+	DiskUsed     uint64   `json:"diskUsed"`
+	DiskFree     uint64   `json:"diskFree"`
+	Uptime       float64  `json:"uptime"`       // 秒
+	ProcMem      uint64   `json:"procMem"`      // 进程内存（Alloc）
+	ProcMemSys   uint64   `json:"procMemSys"`   // 进程从系统获取的内存
+	CPUUsage     float64  `json:"cpuUsage"`     // 系统CPU使用率 0-100
+	ProcCPU      float64  `json:"procCPU"`      // 进程CPU使用率 0-100
+	DBSize       int64    `json:"dbSize"`       // 数据库文件大小
+	DBSizeString string   `json:"dbSizeString"` // 数据库文件大小（格式化）
+}
+
+type AIStatus struct {
+	Enabled bool            `json:"enabled"`
+	Model   AIServiceStatus `json:"model"`
+	Qdrant  AIServiceStatus `json:"qdrant"`
+}
+
+type AIServiceStatus struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+	Version string `json:"version,omitempty"`
+	Device  string `json:"device,omitempty"`
 }
 
 var cpuStatsLock sync.Mutex
@@ -52,10 +67,10 @@ type cpuTime struct {
 }
 
 type procCPUTime struct {
-	utime   uint64
-	stime   uint64
-	cutime  uint64
-	cstime  uint64
+	utime     uint64
+	stime     uint64
+	cutime    uint64
+	cstime    uint64
 	startTime uint64
 }
 
@@ -115,6 +130,8 @@ func HandleSystemInfo(w http.ResponseWriter, r *http.Request) {
 		ProcMem:     m.Alloc,
 		ProcMemSys:  m.Sys,
 	}
+	aiEnabled, settingErr := db.GetSetting("ai_enabled")
+	info.AI = probeAIStatus(settingErr == nil && aiEnabled == "true")
 
 	// 磁盘信息
 	s := &syscallStat{}
@@ -163,7 +180,7 @@ func HandleSystemInfo(w http.ResponseWriter, r *http.Request) {
 			if info.ProcCPU < 0 {
 				info.ProcCPU = 0
 			}
-			if info.ProcCPU > 100 * float64(runtime.NumCPU()) {
+			if info.ProcCPU > 100*float64(runtime.NumCPU()) {
 				info.ProcCPU = 100 * float64(runtime.NumCPU())
 			}
 		}
@@ -174,6 +191,113 @@ func HandleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	lastCPUReadTime = now
 
 	writeOK(w, info)
+}
+
+func probeAIStatus(enabled bool) AIStatus {
+	status := AIStatus{Enabled: enabled}
+	if !enabled {
+		status.Model.Status = "disabled"
+		status.Model.Message = "AI 未启用"
+		status.Qdrant.Status = "disabled"
+		status.Qdrant.Message = "AI 未启用"
+		return status
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	status.Model = probeModelStatus(client)
+	status.Qdrant = probeQdrantStatus(client)
+	return status
+}
+
+func probeModelStatus(client *http.Client) AIServiceStatus {
+	result := AIServiceStatus{Status: "unavailable", Message: "模型服务不可用"}
+	resp, err := client.Get("http://127.0.0.1:8000/health")
+	if err != nil {
+		if embedServerRunning() {
+			result.Status = "loading"
+			result.Message = "模型正在加载"
+		}
+		return result
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		result.Status = "loading"
+		result.Message = "模型正在加载"
+		return result
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.Message = fmt.Sprintf("模型服务返回 HTTP %d", resp.StatusCode)
+		return result
+	}
+	var payload struct {
+		Status string `json:"status"`
+		Device string `json:"device"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		result.Message = "模型健康检查响应无效"
+		return result
+	}
+	result.Status = "ready"
+	result.Message = "模型已加载"
+	result.Device = payload.Device
+	return result
+}
+
+func probeQdrantStatus(client *http.Client) AIServiceStatus {
+	result := AIServiceStatus{Status: "unavailable", Message: "Qdrant 不可用"}
+	resp, err := client.Get("http://127.0.0.1:6333/")
+	if err != nil {
+		return result
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.Message = fmt.Sprintf("Qdrant 返回 HTTP %d", resp.StatusCode)
+		return result
+	}
+	var payload struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		result.Message = "Qdrant 健康检查响应无效"
+		return result
+	}
+	result.Status = "ready"
+	result.Message = "Qdrant 已就绪"
+	result.Version = payload.Version
+	return result
+}
+
+func embedServerRunning() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		var pid int
+		if _, err := fmt.Sscan(entry.Name(), &pid); err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err == nil && containsEmbedServer(string(cmdline)) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEmbedServer(cmdline string) bool {
+	for _, part := range strings.Split(cmdline, "\x00") {
+		if filepath.Base(part) == "embed_server.py" {
+			return true
+		}
+	}
+	return false
 }
 
 func formatBytes(bytes uint64) string {
@@ -197,12 +321,12 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "获取配置失败")
 		return
 	}
-	
+
 	enabled := false
 	if aiEnabled == "true" {
 		enabled = true
 	}
-	
+
 	writeOK(w, map[string]interface{}{
 		"ai_enabled": enabled,
 	})
@@ -217,18 +341,18 @@ func HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "解析请求参数失败")
 		return
 	}
-	
+
 	val := "false"
 	if payload.AIEnabled {
 		val = "true"
 	}
-	
+
 	// 保存设置
 	if err := db.SetSetting("ai_enabled", val); err != nil {
 		writeError(w, "保存配置失败")
 		return
 	}
-	
+
 	// 动态启动/关闭 AI 后台服务
 	if payload.AIEnabled {
 		log.Println("[设置] AI 功能被启用，触发依赖检测与服务启动...")
@@ -242,6 +366,6 @@ func HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			exec.Command("pkill", "qdrant").Run()
 		}()
 	}
-	
+
 	writeOK(w, nil)
 }

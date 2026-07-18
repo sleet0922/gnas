@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
-import { apiGet, apiPost, getAuthImageUrl, getAuthDownloadUrl, type MediaItem } from '@/composables/useApi'
+import { apiGet, apiPost, apiImportGallery, getAuthImageUrl, getAuthDownloadUrl, getAuthGalleryExportUrl, type MediaItem } from '@/composables/useApi'
 
 const items = ref<MediaItem[]>([])
 const loading = ref(true)
@@ -12,6 +12,8 @@ const filter = ref<'all' | 'image' | 'video'>('all')
 const selectMode = ref(false)
 const selectedPaths = ref<Set<string>>(new Set())
 const batchDeleteDialog = ref(false)
+const importInput = ref<HTMLInputElement>()
+const importing = ref(false)
 
 const filteredItems = computed(() => {
   if (filter.value === 'all') return items.value
@@ -68,6 +70,36 @@ async function loadGallery() {
   loading.value = false
   selectMode.value = false
   selectedPaths.value.clear()
+}
+
+function exportGallery() {
+  const link = document.createElement('a')
+  link.href = getAuthGalleryExportUrl()
+  link.download = 'gnas-gallery.zip'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+}
+
+async function importGallery(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    alert('请选择 ZIP 文件')
+    return
+  }
+  importing.value = true
+  try {
+    const result = await apiImportGallery(file)
+    await loadGallery()
+    alert(`导入完成，共导入 ${result?.imported ?? 0} 个文件`)
+  } catch (e: unknown) {
+    alert(e instanceof Error ? e.message : '导入失败')
+  } finally {
+    importing.value = false
+  }
 }
 
 function openPreview(item: MediaItem) {
@@ -205,6 +237,9 @@ onMounted(() => {
           <v-btn variant="text" size="small" @click="exitSelectMode">取消</v-btn>
         </template>
         <template v-else>
+          <v-btn variant="tonal" size="small" prepend-icon="mdi-export-variant" @click="exportGallery">导出 ZIP</v-btn>
+          <v-btn variant="tonal" size="small" prepend-icon="mdi-import" :loading="importing" @click="importInput?.click()">导入 ZIP</v-btn>
+          <input ref="importInput" type="file" accept=".zip,application/zip" class="d-none" @change="importGallery" />
           <v-btn variant="tonal" size="small" prepend-icon="mdi-check-circle-outline" @click="selectMode = true">批量</v-btn>
           <v-btn variant="tonal" size="small" icon="mdi-refresh" @click="isSearching ? handleSearch() : loadGallery()" />
         </template>

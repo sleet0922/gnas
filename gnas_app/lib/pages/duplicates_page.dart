@@ -97,7 +97,7 @@ class _DuplicatesPageState extends State<DuplicatesPage>
         final group = _duplicateGroups[groupIdx];
         final items = List<dynamic>.from(group['items']);
         items.removeWhere((i) => i['path'] == path);
-        
+
         if (items.length < 2) {
           _duplicateGroups.removeAt(groupIdx);
         } else {
@@ -105,15 +105,27 @@ class _DuplicatesPageState extends State<DuplicatesPage>
         }
         _loading = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('删除成功')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('删除成功')));
     } else {
       setState(() => _loading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res.message ?? '删除失败')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(res.message ?? '删除失败')));
     }
+  }
+
+  String _formatBytes(dynamic value) {
+    final bytes = (value as num?)?.toInt() ?? 0;
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
   }
 
   void _previewImage(String path, String name) {
@@ -216,17 +228,18 @@ class _DuplicatesPageState extends State<DuplicatesPage>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.check_circle_outline, size: 80, color: Colors.green.shade200),
+            Icon(
+              Icons.check_circle_outline,
+              size: 80,
+              color: Colors.green.shade200,
+            ),
             const SizedBox(height: 16),
             const Text(
               '没有发现相似图片',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            Text(
-              '您的相册非常整洁！',
-              style: TextStyle(color: Colors.grey.shade600),
-            ),
+            Text('您的相册非常整洁！', style: TextStyle(color: Colors.grey.shade600)),
           ],
         ),
       );
@@ -243,7 +256,9 @@ class _DuplicatesPageState extends State<DuplicatesPage>
 
             return Card(
               margin: const EdgeInsets.only(bottom: 16),
-              color: theme.colorScheme.surfaceVariant.withOpacity(0.3),
+              color: theme.colorScheme.surfaceContainerHighest.withValues(
+                alpha: 0.3,
+              ),
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -288,6 +303,7 @@ class _DuplicatesPageState extends State<DuplicatesPage>
                           final item = items[itemIdx];
                           final name = item['name'] ?? '';
                           final path = item['path'] ?? '';
+                          final size = item['size'];
 
                           return Container(
                             width: 120,
@@ -300,16 +316,19 @@ class _DuplicatesPageState extends State<DuplicatesPage>
                                       child: ClipRRect(
                                         borderRadius: BorderRadius.circular(8),
                                         child: GestureDetector(
-                                          onTap: () => _previewImage(path, name),
+                                          onTap: () =>
+                                              _previewImage(path, name),
                                           child: Image.network(
                                             _api.getThumbUrl(path),
                                             fit: BoxFit.cover,
                                             width: 120,
-                                            errorBuilder: (_, __, ___) =>
+                                            errorBuilder: (_, _, _) =>
                                                 Container(
-                                              color: Colors.grey.shade200,
-                                              child: const Icon(Icons.image),
-                                            ),
+                                                  color: Colors.grey.shade200,
+                                                  child: const Icon(
+                                                    Icons.image,
+                                                  ),
+                                                ),
                                           ),
                                         ),
                                       ),
@@ -321,6 +340,15 @@ class _DuplicatesPageState extends State<DuplicatesPage>
                                       overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(fontSize: 11),
                                       textAlign: TextAlign.center,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      _formatBytes(size),
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color:
+                                            theme.colorScheme.onSurfaceVariant,
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -338,8 +366,7 @@ class _DuplicatesPageState extends State<DuplicatesPage>
                                         size: 14,
                                         color: Colors.red,
                                       ),
-                                      onPressed: () =>
-                                          _deleteItem(item, idx),
+                                      onPressed: () => _deleteItem(item, idx),
                                     ),
                                   ),
                                 ),
@@ -362,10 +389,7 @@ class _DuplicatesPageState extends State<DuplicatesPage>
       appBar: AppBar(
         title: const Text('图片查重'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _checkAndLoad,
-          ),
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _checkAndLoad),
         ],
       ),
       body: body,

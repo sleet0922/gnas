@@ -14,6 +14,18 @@ const aiEnabled = ref(false)
 const previewDialog = ref(false)
 const previewItem = ref<MediaItem | null>(null)
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let size = bytes
+  let unit = 0
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024
+    unit++
+  }
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
 async function checkAISettings() {
   const data = await apiGet<{ ai_enabled: boolean }>('/api/settings')
   if (data) {
@@ -163,6 +175,9 @@ onMounted(() => {
             
             <div class="text-caption text-truncate mt-2 px-1 text-center" :title="item.name">
               {{ item.name }}
+            </div>
+            <div class="text-caption text-medium-emphasis text-center mt-1">
+              {{ formatBytes(item.size) }}
             </div>
           </v-card>
         </div>

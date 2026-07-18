@@ -13,6 +13,9 @@ const renameDialog = ref(false)
 const renameTarget = ref<FileItem | null>(null)
 const renameName = ref('')
 const newFolderName = ref('')
+const flattenDialog = ref(false)
+const flattenTarget = ref<FileItem | null>(null)
+const flattening = ref(false)
 
 // 批量选择
 const selectMode = ref(false)
@@ -205,6 +208,40 @@ async function doRename() {
   }
 }
 
+function openFlatten(item: FileItem) {
+  if (!item.isDir) return
+  flattenTarget.value = item
+  flattenDialog.value = true
+}
+
+function openFlattenRoot() {
+  flattenTarget.value = {
+    name: '所有文件夹',
+    path: '/',
+    isDir: true,
+    size: 0,
+    modTime: '',
+  }
+  flattenDialog.value = true
+}
+
+async function confirmFlatten() {
+  if (!flattenTarget.value) return
+  flattening.value = true
+  try {
+    const result = await apiPost<{ moved: number; removedDirs: number }>('/api/files/flatten', {
+      path: flattenTarget.value.path,
+    })
+    flattenDialog.value = false
+    showMsg(`已移动 ${result?.moved ?? 0} 个文件，清理 ${result?.removedDirs ?? 0} 个空文件夹`)
+    await loadFiles()
+  } catch (e: unknown) {
+    showMsg(e instanceof Error ? e.message : '拆散文件夹失败')
+  } finally {
+    flattening.value = false
+  }
+}
+
 function downloadFile(item: FileItem) {
   window.open(getAuthDownloadUrl(item.path))
 }
@@ -242,6 +279,7 @@ onMounted(() => loadFiles())
           <v-btn variant="text" size="small" @click="exitSelectMode">取消</v-btn>
         </template>
         <template v-else>
+          <v-btn v-if="currentPath === '/'" variant="tonal" size="small" prepend-icon="mdi-folder-move" @click="openFlattenRoot">拆散文件夹</v-btn>
           <v-btn variant="tonal" size="small" prepend-icon="mdi-check-circle-outline" @click="selectMode = true">批量</v-btn>
           <v-btn variant="tonal" size="small" prepend-icon="mdi-folder-plus" @click="mkdirDialog = true">新建文件夹</v-btn>
           <v-btn variant="tonal" size="small" prepend-icon="mdi-upload" @click="uploadInput?.click()">上传</v-btn>
@@ -303,6 +341,10 @@ onMounted(() => loadFiles())
             <v-btn v-if="!item.isDir" icon size="small" variant="text" @click.stop="downloadFile(item)">
               <v-icon size="18">mdi-download</v-icon>
             </v-btn>
+            <v-btn v-if="item.isDir" icon size="small" variant="text" @click.stop="openFlatten(item)" aria-label="拆散到根目录">
+              <v-icon size="18">mdi-folder-move</v-icon>
+              <v-tooltip activator="parent" location="top">拆散到根目录</v-tooltip>
+            </v-btn>
             <v-btn icon size="small" variant="text" @click.stop="openRename(item)">
               <v-icon size="18">mdi-pencil-outline</v-icon>
             </v-btn>
@@ -361,6 +403,20 @@ onMounted(() => loadFiles())
     </v-dialog>
 
     <!-- 批量删除确认对话框 -->
+    <v-dialog v-model="flattenDialog" max-width="440">
+      <v-card class="pa-6">
+        <h3 class="text-h6 mb-4">拆散文件夹</h3>
+        <p class="text-body-2 mb-2">
+          将“{{ flattenTarget?.name }}”中的所有文件移动到文件根目录，并删除处理后为空的文件夹。
+        </p>
+        <p class="text-caption text-medium-emphasis">同名文件会自动添加序号，不会覆盖原文件。</p>
+        <div class="d-flex justify-end ga-2 mt-4">
+          <v-btn variant="text" :disabled="flattening" @click="flattenDialog = false">取消</v-btn>
+          <v-btn color="primary" :loading="flattening" @click="confirmFlatten">确认拆散</v-btn>
+        </div>
+      </v-card>
+    </v-dialog>
+
     <v-dialog v-model="batchDeleteDialog" max-width="400">
       <v-card class="pa-6">
         <h3 class="text-h6 mb-4">确认删除</h3>

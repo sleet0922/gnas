@@ -27,17 +27,27 @@ import (
 // 文件管理根目录，默认为可执行文件同目录下的 data
 var dataDir string
 
+const thumbnailCacheDirName = "thumbs"
+
 var systemExcludes = map[string]bool{
-	"modelscope_cache": true,
-	"qwen3_env":        true,
-	"qwen3_vl_ov":      true,
-	"tmp":              true,
-	"embed_server.log": true,
-	"embed_server.py":  true,
-	"gnas.db":          true,
-	"gnas.db-journal":  true,
-	"gnas.db-wal":      true,
-	"gnas.db-shm":      true,
+	".gnas":             true,
+	"thumbs":            true,
+	".thumbs":           true,
+	"modelscope_cache":  true,
+	".modelscope_cache": true,
+	"qwen3_env":         true,
+	".qwen3_env":        true,
+	"qwen3_vl_ov":       true,
+	".qwen3_vl_ov":      true,
+	"tmp":               true,
+	".tmp":              true,
+	"embed_server.log":  true,
+	".embed_server.log": true,
+	"embed_server.py":   true,
+	"gnas.db":           true,
+	"gnas.db-journal":   true,
+	"gnas.db-wal":       true,
+	"gnas.db-shm":       true,
 }
 
 func InitDataDir(dir string) {
@@ -120,11 +130,15 @@ func safePath(name string) (string, error) {
 		return "", err
 	}
 	dataAbs, _ := filepath.Abs(dataDir)
-	rel, err := filepath.Rel(dataAbs, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	resolvedDataAbs := dataAbs
+	if resolvedData, err := filepath.EvalSymlinks(dataAbs); err == nil {
+		resolvedDataAbs, _ = filepath.Abs(resolvedData)
+	}
+	rel, ok := relativePathWithin(dataAbs, abs)
+	if !ok {
 		return "", fmt.Errorf("非法路径")
 	}
-	
+
 	// 限制防越权：拒绝访问系统专有文件夹/隐藏文件
 	if rel != "." {
 		parts := strings.Split(filepath.ToSlash(rel), "/")
@@ -134,8 +148,45 @@ func safePath(name string) (string, error) {
 			}
 		}
 	}
-	
+
+	// Reject symlinks that point outside the data directory. The nearest
+	// existing ancestor is checked because the requested path may not exist.
+	for current := abs; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", fmt.Errorf("invalid path")
+			}
+			resolvedAbs, _ := filepath.Abs(resolved)
+			if current != abs {
+				if suffix, ok := relativePathWithin(current, abs); ok {
+					resolvedAbs = filepath.Join(resolvedAbs, suffix)
+				}
+			}
+			if _, ok := relativePathWithin(resolvedDataAbs, resolvedAbs); !ok {
+				return "", fmt.Errorf("invalid path")
+			}
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+
 	return abs, nil
+}
+
+func relativePathWithin(root, target string) (string, bool) {
+	if runtime.GOOS == "windows" {
+		root = strings.ToLower(root)
+		target = strings.ToLower(target)
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
 }
 
 func safeFileName(name string) (string, error) {
@@ -426,7 +477,7 @@ func HandleGalleryList(w http.ResponseWriter, r *http.Request) {
 
 // getThumbCachePath 获取缩略图缓存路径
 func getThumbCachePath(absPath string) string {
-	thumbDir := filepath.Join(dataDir, ".thumbs")
+	thumbDir := filepath.Join(dataDir, internalStorageDir, thumbnailCacheDirName)
 	// 缩略图命名：sl_原文件名.扩展名
 	name := filepath.Base(absPath)
 	ext := filepath.Ext(name)
@@ -436,7 +487,7 @@ func getThumbCachePath(absPath string) string {
 
 // getVideoThumbCachePath 获取视频缩略图缓存路径（固定输出 jpg）
 func getVideoThumbCachePath(absPath string) string {
-	thumbDir := filepath.Join(dataDir, ".thumbs")
+	thumbDir := filepath.Join(dataDir, internalStorageDir, thumbnailCacheDirName)
 	name := filepath.Base(absPath)
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
@@ -867,4 +918,3 @@ func CheckAndInstallFFmpeg() {
 		log.Println("[APT] ffmpeg 自动安装成功！")
 	}()
 }
-

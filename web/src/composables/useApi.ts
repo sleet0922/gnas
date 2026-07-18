@@ -77,6 +77,25 @@ export async function apiUpload(path: string, file: File, dir: string): Promise<
   return null
 }
 
+export function getAuthGalleryExportUrl(): string {
+  const token = getToken()
+  return `/api/gallery/export${token ? `?token=${encodeURIComponent(token)}` : ''}`
+}
+
+export async function apiImportGallery(file: File): Promise<{ imported: number } | null> {
+  const form = new FormData()
+  form.append('file', file)
+  const token = getToken()
+  const res = await fetch(BASE + '/api/gallery/import', {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  })
+  const data = await res.json()
+  if (data.code !== 0) throw new Error(data.message || '导入失败')
+  return data.data as { imported: number } | null
+}
+
 // 类型定义
 export interface LoginStatus {
   needSetup: boolean
@@ -107,7 +126,21 @@ export interface MediaItem {
 }
 
 // 系统信息
+export interface AIServiceStatus {
+  status: 'ready' | 'loading' | 'unavailable' | 'disabled' | string
+  message?: string
+  version?: string
+  device?: string
+}
+
+export interface AIStatus {
+  enabled: boolean
+  model: AIServiceStatus
+  qdrant: AIServiceStatus
+}
+
 export interface SystemInfo {
+  ai: AIStatus
   os: string
   arch: string
   cpuCores: number

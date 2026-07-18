@@ -124,3 +124,12 @@ flutter run
 GNAS 后端支持以下命令行参数：
 - `-l` : 绑定监听的地址与端口（默认 `":8080"`）。
 - `-data` : 数据和 SQLite 数据库的存储路径（默认 `"/var/lib/gnas"`）。
+
+## 相册 ZIP 备份
+
+- `GET /api/gallery/export`：将用户文件压缩为 ZIP 下载。数据库、缩略图缓存和运行时目录不会被导出。
+- `POST /api/gallery/import`：使用 `multipart/form-data` 的 `file` 字段上传 ZIP，文件会按 ZIP 内相对路径恢复到数据目录；服务端会拒绝目录穿越、符号链接和受保护目录。
+
+## 文件夹整理
+
+- `POST /api/files/flatten`：请求体为 `{"path":"/folder"}`，递归将文件夹中的文件移动到文件根目录，空文件夹会被删除；同名文件会自动添加序号，不会覆盖已有文件。

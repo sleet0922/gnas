@@ -22,6 +22,7 @@ var webDist embed.FS
 
 var (
 	listenAddr = flag.String("l", ":8080", "监听地址")
+	dataPath   = flag.String("data", "/var/lib/gnas", "数据和数据库存储路径")
 )
 
 var version = "DEV"
@@ -29,8 +30,8 @@ var version = "DEV"
 func main() {
 	flag.Parse()
 
-	// 初始化数据目录 (硬编码为 /var/lib/gnas)
-	dataDir := "/var/lib/gnas"
+	// 初始化数据目录
+	dataDir := filepath.Clean(*dataPath)
 	os.MkdirAll(dataDir, 0755)
 	server.InitDataDir(dataDir)
 
@@ -85,10 +86,13 @@ func startHTTPServer() error {
 	mux.HandleFunc("/api/files/download", protectedAPI(server.HandleFileDownload))
 	mux.HandleFunc("/api/files/thumb", protectedAPI(server.HandleFileThumbnail))
 	mux.HandleFunc("/api/gallery", protectedAPI(server.HandleGalleryList))
+	mux.HandleFunc("/api/gallery/export", protectedAPI(server.HandleGalleryExport))
+	mux.HandleFunc("/api/gallery/import", protectedAPI(server.HandleGalleryImport))
 	mux.HandleFunc("/api/files/delete", protectedAPI(server.HandleFileDelete))
 	mux.HandleFunc("/api/files/batch-delete", protectedAPI(server.HandleFileBatchDelete))
 	mux.HandleFunc("/api/files/mkdir", protectedAPI(server.HandleFileMkdir))
 	mux.HandleFunc("/api/files/rename", protectedAPI(server.HandleFileRename))
+	mux.HandleFunc("/api/files/flatten", protectedAPI(server.HandleFileFlatten))
 	mux.HandleFunc("/api/search", protectedAPI(server.HandleSearchPhotos))
 	mux.HandleFunc("/api/gallery/duplicates", protectedAPI(server.HandleGalleryDuplicates))
 
