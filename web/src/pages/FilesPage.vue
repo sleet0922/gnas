@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, reactive } from 'vue'
 import { apiGet, apiPost, apiUpload, getAuthImageUrl, getAuthDownloadUrl, type FileItem } from '@/composables/useApi'
 
 const files = ref<FileItem[]>([])
@@ -27,6 +27,13 @@ const previewDialog = ref(false)
 const previewUrl = ref('')
 const previewType = ref<'image' | 'video' | 'audio' | 'pdf' | 'text' | 'unknown'>('unknown')
 const previewName = ref('')
+
+const contextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  item: null as FileItem | null,
+})
 
 function showMsg(msg: string) {
   snackbarText.value = msg
@@ -214,6 +221,36 @@ function openFlatten(item: FileItem) {
   flattenDialog.value = true
 }
 
+function closeContextMenu() {
+  contextMenu.visible = false
+  contextMenu.item = null
+}
+
+function openContextMenu(event: MouseEvent, item: FileItem) {
+  event.preventDefault()
+  event.stopPropagation()
+  contextMenu.item = item
+  contextMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - 224))
+  contextMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - 340))
+  contextMenu.visible = true
+}
+
+function onContextKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeContextMenu()
+}
+
+function runContextAction(action: 'open' | 'preview' | 'download' | 'rename' | 'flatten' | 'delete') {
+  const item = contextMenu.item
+  closeContextMenu()
+  if (!item) return
+  if (action === 'open') enterDir(item)
+  else if (action === 'preview') openPreview(item)
+  else if (action === 'download') downloadFile(item)
+  else if (action === 'rename') openRename(item)
+  else if (action === 'flatten') openFlatten(item)
+  else if (action === 'delete') deleteItem(item)
+}
+
 function openFlattenRoot() {
   flattenTarget.value = {
     name: '所有文件夹',
@@ -261,11 +298,22 @@ async function onFileChange(e: Event) {
   input.value = ''
 }
 
-onMounted(() => loadFiles())
+onMounted(() => {
+  loadFiles()
+  window.addEventListener('click', closeContextMenu)
+  window.addEventListener('scroll', closeContextMenu, true)
+  window.addEventListener('keydown', onContextKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('scroll', closeContextMenu, true)
+  window.removeEventListener('keydown', onContextKeydown)
+})
 </script>
 
 <template>
-  <div>
+  <div @contextmenu.prevent="closeContextMenu">
     <div class="d-flex align-center justify-space-between mb-4">
       <h1 class="text-h5 font-weight-bold">文件管理</h1>
       <div class="d-flex ga-2">
@@ -312,6 +360,7 @@ onMounted(() => loadFiles())
           v-for="item in files"
           :key="item.path"
           @click="enterDir(item)"
+          @contextmenu.prevent.stop="openContextMenu($event, item)"
           :class="{ 'bg-primary-lighten-5': selectMode && selectedPaths.has(item.path) }"
         >
           <template #prepend>
@@ -355,6 +404,53 @@ onMounted(() => loadFiles())
         </v-list-item>
       </v-list>
     </v-card>
+
+    <div
+      v-if="contextMenu.visible"
+      class="web-context-menu"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      @click.stop
+      @contextmenu.prevent.stop
+    >
+      <v-list density="compact" min-width="210" class="py-1">
+        <v-list-item
+          v-if="contextMenu.item?.isDir"
+          prepend-icon="mdi-folder-open-outline"
+          title="打开文件夹"
+          @click="runContextAction('open')"
+        />
+        <v-list-item
+          v-if="contextMenu.item && canPreview(contextMenu.item)"
+          prepend-icon="mdi-eye-outline"
+          title="预览"
+          @click="runContextAction('preview')"
+        />
+        <v-list-item
+          v-if="contextMenu.item && !contextMenu.item.isDir"
+          prepend-icon="mdi-download-outline"
+          title="下载"
+          @click="runContextAction('download')"
+        />
+        <v-list-item
+          v-if="contextMenu.item?.isDir"
+          prepend-icon="mdi-folder-move-outline"
+          title="拆散到根目录"
+          @click="runContextAction('flatten')"
+        />
+        <v-list-item
+          prepend-icon="mdi-pencil-outline"
+          title="重命名"
+          @click="runContextAction('rename')"
+        />
+        <v-divider class="my-1" />
+        <v-list-item
+          prepend-icon="mdi-delete-outline"
+          title="删除"
+          class="text-error"
+          @click="runContextAction('delete')"
+        />
+      </v-list>
+    </div>
 
     <!-- 预览对话框 -->
     <v-dialog v-model="previewDialog" max-width="900" scrollable>
@@ -433,3 +529,15 @@ onMounted(() => loadFiles())
     </v-snackbar>
   </div>
 </template>
+
+<style scoped>
+.web-context-menu {
+  position: fixed;
+  z-index: 2400;
+  overflow: hidden;
+  border: 1px solid rgba(var(--v-border-color), 0.16);
+  border-radius: 8px;
+  background: rgb(var(--v-theme-surface));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+</style>

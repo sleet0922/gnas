@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, reactive } from 'vue'
 import { apiGet, apiPost, apiImportGallery, getAuthImageUrl, getAuthDownloadUrl, getAuthGalleryExportUrl, type MediaItem } from '@/composables/useApi'
 
 const items = ref<MediaItem[]>([])
@@ -14,6 +14,13 @@ const selectedPaths = ref<Set<string>>(new Set())
 const batchDeleteDialog = ref(false)
 const importInput = ref<HTMLInputElement>()
 const importing = ref(false)
+
+const contextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  item: null as MediaItem | null,
+})
 
 const filteredItems = computed(() => {
   if (filter.value === 'all') return items.value
@@ -143,6 +150,33 @@ function originalUrl(item: MediaItem): string {
   return getAuthDownloadUrl(item.path, true)
 }
 
+function closeContextMenu() {
+  contextMenu.visible = false
+  contextMenu.item = null
+}
+
+function openContextMenu(event: MouseEvent, item: MediaItem) {
+  event.preventDefault()
+  event.stopPropagation()
+  contextMenu.item = item
+  contextMenu.x = Math.min(event.clientX, Math.max(8, window.innerWidth - 224))
+  contextMenu.y = Math.min(event.clientY, Math.max(8, window.innerHeight - 220))
+  contextMenu.visible = true
+}
+
+function onContextKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') closeContextMenu()
+}
+
+function runContextAction(action: 'preview' | 'download' | 'delete') {
+  const item = contextMenu.item
+  closeContextMenu()
+  if (!item) return
+  if (action === 'preview') openPreview(item)
+  else if (action === 'download') window.open(getAuthDownloadUrl(item.path))
+  else if (action === 'delete') deleteItem(item)
+}
+
 // 删除单个
 async function deleteItem(item: MediaItem) {
   try {
@@ -199,11 +233,21 @@ onMounted(() => {
   loadGallery()
   checkAISettings()
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('click', closeContextMenu)
+  window.addEventListener('scroll', closeContextMenu, true)
+  window.addEventListener('keydown', onContextKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('scroll', closeContextMenu, true)
+  window.removeEventListener('keydown', onContextKeydown)
 })
 </script>
 
 <template>
-  <div>
+  <div @contextmenu.prevent="closeContextMenu">
     <div class="d-flex flex-wrap align-center justify-space-between mb-4 ga-2">
       <div class="d-flex align-center ga-4">
         <h1 class="text-h5 font-weight-bold">相册</h1>
@@ -262,6 +306,7 @@ onMounted(() => {
         class="gallery-item"
         :class="{ 'gallery-selected': selectMode && selectedPaths.has(item.path) }"
         @click="openPreview(item)"
+        @contextmenu.prevent.stop="openContextMenu($event, item)"
       >
         <!-- 选择模式下显示勾选框 -->
         <div v-if="selectMode" class="gallery-check">
@@ -295,6 +340,34 @@ onMounted(() => {
           </v-btn>
         </div>
       </div>
+    </div>
+
+    <div
+      v-if="contextMenu.visible"
+      class="web-context-menu"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      @click.stop
+      @contextmenu.prevent.stop
+    >
+      <v-list density="compact" min-width="210" class="py-1">
+        <v-list-item
+          prepend-icon="mdi-eye-outline"
+          title="预览"
+          @click="runContextAction('preview')"
+        />
+        <v-list-item
+          prepend-icon="mdi-download-outline"
+          title="下载"
+          @click="runContextAction('download')"
+        />
+        <v-divider class="my-1" />
+        <v-list-item
+          prepend-icon="mdi-delete-outline"
+          title="删除"
+          class="text-error"
+          @click="runContextAction('delete')"
+        />
+      </v-list>
     </div>
 
     <!-- 预览弹窗 -->
@@ -431,5 +504,15 @@ onMounted(() => {
 
 .gallery-item:hover .gallery-del-btn {
   opacity: 1;
+}
+
+.web-context-menu {
+  position: fixed;
+  z-index: 2400;
+  overflow: hidden;
+  border: 1px solid rgba(var(--v-border-color), 0.16);
+  border-radius: 8px;
+  background: rgb(var(--v-theme-surface));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 </style>
