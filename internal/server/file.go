@@ -1,0 +1,1158 @@
+package server
+
+import (
+	"crypto/sha1"
+	"encoding/json"
+	"fmt"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
+	"io"
+	"io/fs"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/image/draw"
+	_ "golang.org/x/image/webp" // 注册 WebP 解码器
+)
+
+// 文件管理根目录，默认为可执行文件同目录下的 data
+var dataDir string
+
+const (
+	thumbnailCacheDirName       = "thumbs"
+	vectorThumbnailCacheDirName = "vector_thumbs"
+	thumbnailConcurrency        = 1
+	vectorThumbnailConcurrency  = 1
+	maxThumbnailPixels          = uint64(40_000_000)
+	vectorThumbnailMaxDimension = 1280
+)
+
+var thumbnailSlots = make(chan struct{}, thumbnailConcurrency)
+var vectorThumbnailSlots = make(chan struct{}, vectorThumbnailConcurrency)
+
+type thumbnailCall struct {
+	done chan struct{}
+	path string
+	err  error
+}
+
+var thumbnailCalls sync.Map
+var vectorThumbnailCalls sync.Map
+
+func runThumbnail(srcPath string, generate func() (string, error)) (string, error) {
+	call := &thumbnailCall{done: make(chan struct{})}
+	actual, loaded := thumbnailCalls.LoadOrStore(srcPath, call)
+	if loaded {
+		other := actual.(*thumbnailCall)
+		<-other.done
+		return other.path, other.err
+	}
+
+	thumbnailSlots <- struct{}{}
+	call.path, call.err = generate()
+	<-thumbnailSlots
+	close(call.done)
+	thumbnailCalls.Delete(srcPath)
+	return call.path, call.err
+}
+
+func runVectorThumbnail(srcPath string, generate func() (string, error)) (string, error) {
+	call := &thumbnailCall{done: make(chan struct{})}
+	actual, loaded := vectorThumbnailCalls.LoadOrStore(srcPath, call)
+	if loaded {
+		other := actual.(*thumbnailCall)
+		<-other.done
+		return other.path, other.err
+	}
+
+	vectorThumbnailSlots <- struct{}{}
+	call.path, call.err = generate()
+	<-vectorThumbnailSlots
+	close(call.done)
+	vectorThumbnailCalls.Delete(srcPath)
+	return call.path, call.err
+}
+
+var systemExcludes = map[string]bool{
+	"_gnas_migration":   true,
+	".gnas":             true,
+	"gnas":              true,
+	"thumbs":            true,
+	".thumbs":           true,
+	"vector_thumbs":     true,
+	".vector_thumbs":    true,
+	"modelscope_cache":  true,
+	".modelscope_cache": true,
+	"qwen3_env":         true,
+	".qwen3_env":        true,
+	"qwen3_vl_ov":       true,
+	".qwen3_vl_ov":      true,
+	"tmp":               true,
+	".tmp":              true,
+	"embed_server.log":  true,
+	".embed_server.log": true,
+	"embed_server.py":   true,
+	"gnas.db":           true,
+	"gnas.db-journal":   true,
+	"gnas.db-wal":       true,
+	"gnas.db-shm":       true,
+}
+
+func InitDataDir(dir string) {
+	dataDir = dir
+	os.MkdirAll(dataDir, 0755)
+}
+
+// thumbCacheValid 检查缩略图缓存是否有效（缓存文件比源文件新）
+func thumbCacheValid(srcPath string) bool {
+	var thumbPath string
+	if isImageExt(srcPath) {
+		thumbPath = getThumbCachePath(srcPath)
+	} else if isVideoExt(srcPath) {
+		thumbPath = getVideoThumbCachePath(srcPath)
+	} else {
+		return false
+	}
+	if thumbInfo, err := os.Stat(thumbPath); err == nil {
+		if srcInfo, err := os.Stat(srcPath); err == nil {
+			return thumbInfo.ModTime().After(srcInfo.ModTime())
+		}
+	}
+	return false
+}
+
+// generateThumbForFile 为单个文件生成缩略图（图片或视频），并打印日志
+func generateThumbForFile(absPath string) {
+	name := filepath.Base(absPath)
+	if isImageExt(name) {
+		if _, err := generateThumbnail(absPath); err != nil {
+			log.Printf("[缩略图] 生成图片缩略图失败 %s: %v", name, err)
+		} else {
+			log.Printf("[缩略图] 已生成图片缩略图: %s", name)
+			// 将向量任务放入有界队列，避免扫描时创建大量 goroutine。
+			enqueueImageEmbedding(absPath)
+		}
+	} else if isVideoExt(name) {
+		if _, err := generateVideoThumbnail(absPath); err != nil {
+			log.Printf("[缩略图] 生成视频缩略图失败 %s: %v", name, err)
+		} else {
+			log.Printf("[缩略图] 已生成视频缩略图: %s", name)
+		}
+	}
+}
+
+// GenerateAllThumbnails 扫描 dataDir 下所有图片和视频，生成缩略图（已缓存则跳过）
+func GenerateAllThumbnails() {
+	log.Println("[缩略图] 开始扫描并生成所有媒体缩略图...")
+	generated := 0
+	skipped := 0
+	filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != dataDir && (strings.HasPrefix(name, ".") || systemExcludes[name]) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if isImageExt(name) || isVideoExt(name) {
+			if thumbCacheValid(path) {
+				skipped++
+				return nil
+			}
+			generateThumbForFile(path)
+			generated++
+		}
+		return nil
+	})
+	log.Printf("[缩略图] 扫描完成，新生成 %d 个，已缓存跳过 %d 个", generated, skipped)
+}
+
+func safePath(name string) (string, error) {
+	p := filepath.Join(dataDir, name)
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	dataAbs, _ := filepath.Abs(dataDir)
+	resolvedDataAbs := dataAbs
+	if resolvedData, err := filepath.EvalSymlinks(dataAbs); err == nil {
+		resolvedDataAbs, _ = filepath.Abs(resolvedData)
+	}
+	rel, ok := relativePathWithin(dataAbs, abs)
+	if !ok {
+		return "", fmt.Errorf("非法路径")
+	}
+
+	// 限制防越权：拒绝访问系统专有文件夹/隐藏文件
+	if rel != "." {
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		for _, part := range parts {
+			if strings.HasPrefix(part, ".") || systemExcludes[part] {
+				return "", fmt.Errorf("非法路径")
+			}
+		}
+	}
+
+	// Reject symlinks that point outside the data directory. The nearest
+	// existing ancestor is checked because the requested path may not exist.
+	for current := abs; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", fmt.Errorf("invalid path")
+			}
+			resolvedAbs, _ := filepath.Abs(resolved)
+			if current != abs {
+				if suffix, ok := relativePathWithin(current, abs); ok {
+					resolvedAbs = filepath.Join(resolvedAbs, suffix)
+				}
+			}
+			if _, ok := relativePathWithin(resolvedDataAbs, resolvedAbs); !ok {
+				return "", fmt.Errorf("invalid path")
+			}
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+
+	return abs, nil
+}
+
+func relativePathWithin(root, target string) (string, bool) {
+	if runtime.GOOS == "windows" {
+		root = strings.ToLower(root)
+		target = strings.ToLower(target)
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
+func safeFileName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("文件名不能为空")
+	}
+	if name != filepath.Base(name) || name == "." || name == ".." {
+		return "", fmt.Errorf("非法文件名")
+	}
+	return name, nil
+}
+
+// FileInfo 文件信息
+type FileInfo struct {
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`
+	IsDir   bool      `json:"isDir"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
+}
+
+// HandleFileList 浏览文件列表
+func HandleFileList(w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("path")
+	if dir == "" {
+		dir = "/"
+	}
+
+	absPath, err := safePath(dir)
+	if err != nil {
+		writeError(w, "非法路径")
+		return
+	}
+
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeOK(w, []FileInfo{})
+			return
+		}
+		writeError(w, "读取目录失败")
+		return
+	}
+
+	var files []FileInfo
+	for _, entry := range entries {
+		// 跳过隐藏目录、系统排除目录与文件（如大模型缓存与运行环境）
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || systemExcludes[name] {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		relPath := filepath.Join(dir, entry.Name())
+		files = append(files, FileInfo{
+			Name:    entry.Name(),
+			Path:    filepath.ToSlash(relPath),
+			IsDir:   entry.IsDir(),
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		})
+	}
+
+	// 目录排前面，然后按名称排序
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].IsDir != files[j].IsDir {
+			return files[i].IsDir
+		}
+		return strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
+	})
+
+	writeOK(w, files)
+}
+
+// HandleFileUpload 上传文件
+func HandleFileUpload(w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("path")
+	if dir == "" {
+		dir = "/"
+	}
+
+	absDir, err := safePath(dir)
+	if err != nil {
+		writeError(w, "非法路径")
+		return
+	}
+
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeError(w, "解析上传数据失败")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, "获取上传文件失败")
+		return
+	}
+	defer file.Close()
+
+	fileName, err := safeFileName(header.Filename)
+	if err != nil {
+		writeError(w, "非法文件名")
+		return
+	}
+	dstPath := filepath.Join(absDir, fileName)
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		writeError(w, "创建文件失败")
+		return
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, file); err != nil {
+		writeError(w, "写入文件失败")
+		return
+	}
+
+	// 上传完成后，异步生成缩略图
+	go generateThumbForFile(dstPath)
+
+	writeOK(w, nil)
+}
+
+// mimeTypeByExt 根据扩展名返回 MIME 类型
+// formatContentDisposition 生成支持中文文件名的 Content-Disposition header (RFC 5987)
+func formatContentDisposition(disposition, filename string) string {
+	encoded := url.PathEscape(filename)
+	// filename 用 ASCII 兼容的占位，filename* 用 UTF-8 编码
+	asciiName := toASCII(filename)
+	// 转义双引号防止 header 注入
+	asciiName = strings.ReplaceAll(asciiName, `"`, `\"`)
+	return fmt.Sprintf("%s; filename=\"%s\"; filename*=UTF-8''%s", disposition, asciiName, encoded)
+}
+
+// toASCII 将非 ASCII 字符替换为 _，确保 filename 字段兼容旧浏览器
+func toASCII(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 128 {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+func mimeTypeByExt(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".svg":
+		return "image/svg+xml"
+	case ".bmp":
+		return "image/bmp"
+	case ".heic", ".heif":
+		return "image/heif"
+	case ".ico":
+		return "image/x-icon"
+	case ".mp4":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".ogv":
+		return "video/ogg"
+	case ".mov":
+		return "video/quicktime"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".ogg":
+		return "audio/ogg"
+	case ".wav":
+		return "audio/wav"
+	case ".flac":
+		return "audio/flac"
+	case ".aac":
+		return "audio/aac"
+	case ".m4a":
+		return "audio/mp4"
+	case ".pdf":
+		return "application/pdf"
+	case ".txt":
+		return "text/plain; charset=utf-8"
+	case ".md":
+		return "text/markdown; charset=utf-8"
+	case ".json":
+		return "application/json"
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
+	case ".css":
+		return "text/css"
+	case ".js":
+		return "application/javascript"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// isImageExt 判断是否为图片扩展名
+func isImageExt(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif":
+		return true
+	}
+	return false
+}
+
+// isVideoExt 判断是否为视频扩展名
+func isVideoExt(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".mp4", ".webm", ".ogv", ".mov":
+		return true
+	}
+	return false
+}
+
+// MediaItem 媒体文件信息
+type MediaItem struct {
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`
+	Type    string    `json:"type"` // "image" 或 "video"
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
+}
+
+// HandleGalleryList 获取所有图片和视频
+func HandleGalleryList(w http.ResponseWriter, r *http.Request) {
+	var items []MediaItem
+	filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != dataDir && (strings.HasPrefix(name, ".") || systemExcludes[name]) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		relPath, err := filepath.Rel(dataDir, path)
+		if err != nil {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if isImageExt(name) {
+			items = append(items, MediaItem{
+				Name:    name,
+				Path:    filepath.ToSlash(relPath),
+				Type:    "image",
+				Size:    info.Size(),
+				ModTime: info.ModTime(),
+			})
+		} else if isVideoExt(name) {
+			items = append(items, MediaItem{
+				Name:    name,
+				Path:    filepath.ToSlash(relPath),
+				Type:    "video",
+				Size:    info.Size(),
+				ModTime: info.ModTime(),
+			})
+		}
+		return nil
+	})
+
+	// 按修改时间倒序（最新的在前）
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].ModTime.After(items[j].ModTime)
+	})
+
+	if items == nil {
+		items = []MediaItem{}
+	}
+	writeOK(w, items)
+}
+
+// getThumbCachePath 获取缩略图缓存路径
+func getThumbCachePath(absPath string) string {
+	thumbDir := filepath.Join(dataDir, internalStorageDir, thumbnailCacheDirName)
+	// 缩略图命名：sl_原文件名.扩展名
+	name := filepath.Base(absPath)
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	// HEIF/HEIC thumbnails are emitted as JPEG because Go and many clients do
+	// not decode those formats consistently.
+	if strings.EqualFold(ext, ".heic") || strings.EqualFold(ext, ".heif") {
+		ext = ".jpg"
+	}
+	return filepath.Join(thumbDir, "sl_"+base+ext)
+}
+
+// getVideoThumbCachePath 获取视频缩略图缓存路径（固定输出 jpg）
+func getVideoThumbCachePath(absPath string) string {
+	thumbDir := filepath.Join(dataDir, internalStorageDir, thumbnailCacheDirName)
+	name := filepath.Base(absPath)
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	return filepath.Join(thumbDir, "sl_"+base+".jpg")
+}
+
+func getVectorThumbCachePath(absPath string) string {
+	thumbDir := filepath.Join(dataDir, internalStorageDir, vectorThumbnailCacheDirName)
+	sum := sha1.Sum([]byte(filepath.Clean(absPath)))
+	return filepath.Join(thumbDir, fmt.Sprintf("vl_%x.jpg", sum[:12]))
+}
+
+func generateVectorThumbnail(srcPath string) (string, error) {
+	return runVectorThumbnail(srcPath, func() (string, error) {
+		return generateVectorThumbnailUnbounded(srcPath)
+	})
+}
+
+func generateVectorThumbnailUnbounded(srcPath string) (string, error) {
+	thumbPath := getVectorThumbCachePath(srcPath)
+	thumbDir := filepath.Dir(thumbPath)
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		return "", err
+	}
+
+	if thumbInfo, err := os.Stat(thumbPath); err == nil {
+		if srcInfo, err := os.Stat(srcPath); err == nil && thumbInfo.ModTime().After(srcInfo.ModTime()) {
+			return thumbPath, nil
+		}
+	}
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return "", fmt.Errorf("ffmpeg is unavailable: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(thumbDir, ".gnas-vector-thumb-*.tmp.jpg")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", err
+	}
+	defer os.Remove(tmpPath)
+
+	scaleFilter := fmt.Sprintf(
+		"scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease:flags=lanczos",
+		vectorThumbnailMaxDimension,
+		vectorThumbnailMaxDimension,
+	)
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
+		"-i", srcPath,
+		"-frames:v", "1",
+		"-vf", scaleFilter,
+		"-q:v", "2",
+		"-y", tmpPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ffmpeg vector thumbnail failed: %v, output: %s", err, strings.TrimSpace(string(output)))
+	}
+	if info, err := os.Stat(tmpPath); err != nil || info.Size() == 0 {
+		if err == nil {
+			err = fmt.Errorf("empty output")
+		}
+		return "", fmt.Errorf("ffmpeg vector thumbnail produced no output: %w", err)
+	}
+	if err := os.Rename(tmpPath, thumbPath); err != nil {
+		return "", err
+	}
+	return thumbPath, nil
+}
+
+// generateVideoThumbnail 使用 ffmpeg 从视频中截取第一帧作为缩略图
+func generateVideoThumbnail(srcPath string) (string, error) {
+	return runThumbnail(srcPath, func() (string, error) {
+		return generateVideoThumbnailUnbounded(srcPath)
+	})
+}
+
+func generateVideoThumbnailUnbounded(srcPath string) (string, error) {
+	thumbPath := getVideoThumbCachePath(srcPath)
+	thumbDir := filepath.Dir(thumbPath)
+	os.MkdirAll(thumbDir, 0755)
+
+	// 检查缓存是否有效
+	if thumbInfo, err := os.Stat(thumbPath); err == nil {
+		if srcInfo, err := os.Stat(srcPath); err == nil {
+			if thumbInfo.ModTime().After(srcInfo.ModTime()) {
+				return thumbPath, nil
+			}
+		}
+	}
+
+	// 使用 ffmpeg 截取第 1 秒的画面，宽度缩放到 300px
+	cmd := exec.Command("ffmpeg",
+		"-i", srcPath,
+		"-ss", "00:00:01",
+		"-vframes", "1",
+		"-vf", "scale=300:-1",
+		"-y",
+		thumbPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ffmpeg 生成视频缩略图失败: %v, output: %s", err, string(output))
+	}
+
+	return thumbPath, nil
+}
+
+// generateThumbnail 生成缩略图，最大宽度 300px，返回缓存文件路径
+func generateThumbnail(srcPath string) (string, error) {
+	return runThumbnail(srcPath, func() (string, error) {
+		return generateThumbnailUnbounded(srcPath)
+	})
+}
+
+func generateThumbnailUnbounded(srcPath string) (string, error) {
+	thumbPath := getThumbCachePath(srcPath)
+	thumbDir := filepath.Dir(thumbPath)
+	os.MkdirAll(thumbDir, 0755)
+
+	// 检查缓存是否有效（缓存文件修改时间晚于原文件）
+	if thumbInfo, err := os.Stat(thumbPath); err == nil {
+		if srcInfo, err := os.Stat(srcPath); err == nil {
+			if thumbInfo.ModTime().After(srcInfo.ModTime()) {
+				return thumbPath, nil
+			}
+		}
+	}
+
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	config, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return generateFFmpegImageThumbnail(srcPath, thumbPath, fmt.Errorf("Go image decoder: %w", err))
+	}
+	if config.Width <= 0 || config.Height <= 0 || uint64(config.Width)*uint64(config.Height) > maxThumbnailPixels {
+		reason := fmt.Errorf("image is %dx%d (%d pixels)", config.Width, config.Height, uint64(config.Width)*uint64(config.Height))
+		return generateFFmpegImageThumbnail(srcPath, thumbPath, reason)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return generateFFmpegImageThumbnail(srcPath, thumbPath, fmt.Errorf("Go image decoder: %w", err))
+	}
+
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	if width <= 300 {
+		// 原图小于 300px，直接复制作为缩略图
+		f.Seek(0, 0)
+		out, err := os.Create(thumbPath)
+		if err != nil {
+			return "", err
+		}
+		defer out.Close()
+		io.Copy(out, f)
+		return thumbPath, nil
+	}
+
+	// 按比例缩放，最大宽度 300px
+	ratio := float64(300) / float64(width)
+	height := int(float64(bounds.Dy()) * ratio)
+
+	dst := image.NewRGBA(image.Rect(0, 0, 300, height))
+	draw.CatmullRom.Scale(dst, dst.Bounds(), img, bounds, draw.Over, nil)
+
+	out, err := os.Create(thumbPath)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+
+	ext := strings.ToLower(filepath.Ext(srcPath))
+	switch ext {
+	case ".jpg", ".jpeg":
+		err = jpeg.Encode(out, dst, &jpeg.Options{Quality: 80})
+	case ".png":
+		err = png.Encode(out, dst)
+	case ".gif":
+		err = gif.Encode(out, dst, nil)
+	default:
+		err = jpeg.Encode(out, dst, &jpeg.Options{Quality: 80})
+	}
+	if err != nil {
+		return "", err
+	}
+	return thumbPath, nil
+}
+
+// generateFFmpegImageThumbnail handles formats unsupported by Go's image
+// package and very large sources without materializing the full image in Go.
+// The caller already holds the global thumbnail slot, so only one FFmpeg
+// process can run at a time.
+func generateFFmpegImageThumbnail(srcPath, thumbPath string, reason error) (string, error) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return "", fmt.Errorf("thumbnail fallback required (%v), but ffmpeg is unavailable: %w", reason, err)
+	}
+
+	thumbDir := filepath.Dir(thumbPath)
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(thumbDir, ".gnas-thumb-*.tmp"+filepath.Ext(thumbPath))
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", err
+	}
+	defer os.Remove(tmpPath)
+
+	// Keep FFmpeg's worker/filter threads bounded. The scale filter reduces
+	// the frame before it is written, and the temporary output is committed
+	// only after FFmpeg exits successfully.
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
+		"-i", srcPath,
+		"-frames:v", "1",
+		"-vf", "scale=300:-1:flags=fast_bilinear",
+		"-q:v", "5",
+		"-y", tmpPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ffmpeg thumbnail fallback failed (%v; source: %v), output: %s", err, reason, strings.TrimSpace(string(output)))
+	}
+	if info, err := os.Stat(tmpPath); err != nil || info.Size() == 0 {
+		if err == nil {
+			err = fmt.Errorf("empty output")
+		}
+		return "", fmt.Errorf("ffmpeg thumbnail fallback produced no output (source: %v): %w", reason, err)
+	}
+	if err := os.Rename(tmpPath, thumbPath); err != nil {
+		return "", err
+	}
+	return thumbPath, nil
+}
+
+// HandleFileDownload 下载/预览文件
+func HandleFileDownload(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, "缺少路径参数")
+		return
+	}
+
+	absPath, err := safePath(path)
+	if err != nil {
+		writeError(w, "非法路径")
+		return
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() {
+		writeError(w, "文件不存在")
+		return
+	}
+
+	// 根据 disposition 参数决定是下载还是预览
+	disposition := r.URL.Query().Get("disposition")
+	if disposition == "inline" {
+		// 预览模式：设置正确的 Content-Type 和 inline
+		mime := mimeTypeByExt(filepath.Base(absPath))
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set("Content-Disposition", formatContentDisposition("inline", filepath.Base(absPath)))
+		f, err := os.Open(absPath)
+		if err != nil {
+			writeError(w, "打开文件失败")
+			return
+		}
+		defer f.Close()
+		http.ServeContent(w, r, filepath.Base(absPath), info.ModTime(), f)
+		return
+	}
+
+	// 下载模式：使用自定义 header 确保中文文件名正确
+	name := filepath.Base(absPath)
+	mime := mimeTypeByExt(name)
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Content-Disposition", formatContentDisposition("attachment", name))
+	f, err := os.Open(absPath)
+	if err != nil {
+		writeError(w, "打开文件失败")
+		return
+	}
+	defer f.Close()
+	http.ServeContent(w, r, name, info.ModTime(), f)
+}
+
+// HandleFileThumbnail 获取缩略图
+func HandleFileThumbnail(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, "缺少路径参数")
+		return
+	}
+
+	absPath, err := safePath(path)
+	if err != nil {
+		writeError(w, "非法路径")
+		return
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() {
+		writeError(w, "文件不存在")
+		return
+	}
+
+	// 根据文件类型选择生成方式
+	if isVideoExt(absPath) {
+		thumbPath, err := generateVideoThumbnail(absPath)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		thumbInfo, err := os.Stat(thumbPath)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", thumbInfo.Size()))
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		f, err := os.Open(thumbPath)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+		return
+	}
+
+	// 非图片文件返回 404
+	if !isImageExt(absPath) {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	thumbPath, err := generateThumbnail(absPath)
+	if err != nil {
+		// 生成失败则回退到原图
+		w.Header().Set("Content-Type", mimeTypeByExt(filepath.Base(absPath)))
+		f, err := os.Open(absPath)
+		if err != nil {
+			writeError(w, "打开文件失败")
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+		return
+	}
+
+	thumbInfo, err := os.Stat(thumbPath)
+	if err != nil {
+		writeError(w, "读取缩略图失败")
+		return
+	}
+
+	w.Header().Set("Content-Type", mimeTypeByExt(filepath.Base(thumbPath)))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", thumbInfo.Size()))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	f, err := os.Open(thumbPath)
+	if err != nil {
+		writeError(w, "打开文件失败")
+		return
+	}
+	defer f.Close()
+	io.Copy(w, f)
+}
+
+// HandleFileDelete 删除文件或目录
+func HandleFileDelete(w http.ResponseWriter, r *http.Request) {
+	var data struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		writeError(w, "请求格式错误")
+		return
+	}
+
+	absPath, err := safePath(data.Path)
+	if err != nil {
+		writeError(w, "非法路径")
+		return
+	}
+
+	if absPath == dataDir {
+		writeError(w, "不能删除根目录")
+		return
+	}
+	info, statErr := os.Stat(absPath)
+	wasDir := statErr == nil && info.IsDir()
+	markDeletedEmbeddingPath(absPath)
+
+	// 清理缩略图缓存
+	cleanThumbCache(absPath)
+
+	if err := os.RemoveAll(absPath); err != nil {
+		clearDeletedEmbeddingPath(absPath)
+		writeError(w, "删除失败")
+		return
+	}
+	deleteQdrantVectorsForPath(absPath, wasDir)
+
+	writeOK(w, nil)
+}
+
+// cleanThumbCache 清理文件对应的缩略图缓存
+func cleanThumbCache(absPath string) {
+	if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+		_ = filepath.WalkDir(absPath, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if !entry.IsDir() {
+				cleanThumbCache(path)
+			}
+			return nil
+		})
+		return
+	}
+	if isImageExt(absPath) {
+		thumbPath := getThumbCachePath(absPath)
+		os.Remove(thumbPath)
+		os.Remove(getVectorThumbCachePath(absPath))
+	} else if isVideoExt(absPath) {
+		thumbPath := getVideoThumbCachePath(absPath)
+		os.Remove(thumbPath)
+	}
+}
+
+// HandleFileBatchDelete 批量删除文件或目录
+func HandleFileBatchDelete(w http.ResponseWriter, r *http.Request) {
+	var data struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		writeError(w, "请求格式错误")
+		return
+	}
+
+	if len(data.Paths) == 0 {
+		writeError(w, "未选择文件")
+		return
+	}
+
+	var failed []string
+	for _, p := range data.Paths {
+		absPath, err := safePath(p)
+		if err != nil {
+			failed = append(failed, p)
+			continue
+		}
+		if absPath == dataDir {
+			failed = append(failed, p)
+			continue
+		}
+		info, statErr := os.Stat(absPath)
+		wasDir := statErr == nil && info.IsDir()
+		markDeletedEmbeddingPath(absPath)
+		cleanThumbCache(absPath)
+		if err := os.RemoveAll(absPath); err != nil {
+			clearDeletedEmbeddingPath(absPath)
+			failed = append(failed, p)
+			continue
+		}
+		deleteQdrantVectorsForPath(absPath, wasDir)
+	}
+
+	if len(failed) > 0 {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"code":    1,
+			"message": fmt.Sprintf("部分文件删除失败: %d 个", len(failed)),
+			"data":    failed,
+		})
+		return
+	}
+
+	writeOK(w, nil)
+}
+
+// HandleFileMkdir 新建文件夹
+func HandleFileMkdir(w http.ResponseWriter, r *http.Request) {
+	var data struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		writeError(w, "请求格式错误")
+		return
+	}
+
+	absPath, err := safePath(data.Path)
+	if err != nil {
+		writeError(w, "非法路径")
+		return
+	}
+
+	if err := os.MkdirAll(absPath, 0755); err != nil {
+		writeError(w, "创建目录失败")
+		return
+	}
+
+	writeOK(w, nil)
+}
+
+// HandleFileRename 重命名
+func HandleFileRename(w http.ResponseWriter, r *http.Request) {
+	var data struct {
+		OldPath string `json:"oldPath"`
+		NewName string `json:"newName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		writeError(w, "请求格式错误")
+		return
+	}
+
+	absOld, err := safePath(data.OldPath)
+	if err != nil {
+		writeError(w, "非法路径")
+		return
+	}
+
+	newName, err := safeFileName(data.NewName)
+	if err != nil {
+		writeError(w, "非法文件名")
+		return
+	}
+	parent := filepath.Dir(absOld)
+	absNew := filepath.Join(parent, newName)
+
+	// 清理旧缩略图缓存
+	cleanThumbCache(absOld)
+	deleteQdrantVectorsForPath(absOld, false)
+
+	if err := os.Rename(absOld, absNew); err != nil {
+		clearDeletedEmbeddingPath(absOld)
+		writeError(w, "重命名失败")
+		return
+	}
+
+	// Regenerate the display thumbnail and queue a fresh vector thumbnail.
+	go generateThumbForFile(absNew)
+	if isImageExt(absNew) {
+		go enqueueImageEmbedding(absNew)
+	}
+
+	writeOK(w, nil)
+}
+
+// CheckAndInstallFFmpeg 检查 ffmpeg 是否存在，若不存在且在 linux 下且有 apt-get 则自动安装
+func CheckAndInstallFFmpeg() {
+	_, err := exec.LookPath("ffmpeg")
+	if err == nil {
+		log.Println("ffmpeg 已存在，无需自动安装")
+		return
+	}
+
+	if runtime.GOOS != "linux" {
+		log.Printf("ffmpeg 未找到，但当前系统为 %s，无法自动执行 apt 安装", runtime.GOOS)
+		return
+	}
+
+	aptPath, err := exec.LookPath("apt-get")
+	if err != nil {
+		log.Println("ffmpeg 未找到，且未检测到 apt-get，无法自动安装")
+		return
+	}
+
+	log.Println("检测到 ffmpeg 不存在，正在自动通过 apt 安装 ffmpeg...")
+	go func() {
+		// 执行 apt-get update
+		log.Println("[APT] 正在执行 apt-get update...")
+		updateCmd := exec.Command(aptPath, "update")
+		if output, err := updateCmd.CombinedOutput(); err != nil {
+			log.Printf("[APT] apt-get update 失败: %v, output: %s", err, string(output))
+			return
+		}
+
+		// 执行 apt-get install -y ffmpeg
+		log.Println("[APT] 正在执行 apt-get install -y ffmpeg...")
+		installCmd := exec.Command(aptPath, "install", "-y", "ffmpeg")
+		if output, err := installCmd.CombinedOutput(); err != nil {
+			log.Printf("[APT] apt-get install ffmpeg 失败: %v, output: %s", err, string(output))
+			return
+		}
+		log.Println("[APT] ffmpeg 自动安装成功！")
+	}()
+}
