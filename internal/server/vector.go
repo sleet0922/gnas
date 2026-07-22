@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,31 +22,107 @@ import (
 )
 
 const (
-	ollamaURL  = "http://127.0.0.1:11434/api/embeddings"
-	qdrantURL  = "http://127.0.0.1:6333"
-	collection = "gnas_photos"
-	// modelName 不再使用 Ollama，将直接调用 Python 脚本
+	collection         = "gnas_photos"
+	embeddingURL       = "http://127.0.0.1:8000/embed"
+	embeddingDimension = 2048
 )
 
-const embeddingQueueSize = 8
+var qdrantURL = "http://127.0.0.1:6333"
+
+const (
+	embeddingQueueSize = 8
+	// Conservative estimates used to derive request concurrency from host RAM.
+	embeddingBaseMemory = uint64(4 << 30)
+	embeddingTaskMemory = uint64(2 << 30)
+)
 
 var (
-	embeddingSlots        = make(chan struct{}, 1)
+	embeddingConcurrency  = detectEmbeddingConcurrency()
+	embeddingSlots        = make(chan struct{}, embeddingConcurrency)
 	embeddingQueue        = make(chan string, embeddingQueueSize)
 	embeddingPending      sync.Map
 	deletedEmbeddingPaths sync.Map
 	embeddingOnce         sync.Once
+	interactiveEmbeddings atomic.Int32
 )
+
+func detectEmbeddingConcurrency() int {
+	totalMemory := uint64(0)
+	if content, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(content), "\n") {
+			var kilobytes uint64
+			if _, err := fmt.Sscanf(line, "MemTotal: %d kB", &kilobytes); err == nil {
+				totalMemory = kilobytes * 1024
+				break
+			}
+		}
+	}
+	if totalMemory == 0 {
+		totalMemory = embeddingBaseMemory + embeddingTaskMemory
+	}
+	memoryConcurrency := 1
+	if totalMemory > embeddingBaseMemory {
+		memoryConcurrency = int((totalMemory - embeddingBaseMemory) / embeddingTaskMemory)
+		if memoryConcurrency < 1 {
+			memoryConcurrency = 1
+		}
+	}
+	cpuConcurrency := max(1, runtime.NumCPU()/4)
+	return min(memoryConcurrency, cpuConcurrency)
+}
 
 func startEmbeddingWorker() {
 	embeddingOnce.Do(func() {
-		go func() {
-			for path := range embeddingQueue {
-				generateImageEmbedding(path)
-				embeddingPending.Delete(path)
-			}
-		}()
+		workers := embeddingConcurrency
+		log.Printf("[向量] 自动并发配置：总数 %d，后台 %d，CPU %d 核", embeddingConcurrency, workers, runtime.NumCPU())
+		for i := 0; i < workers; i++ {
+			go func() {
+				for path := range embeddingQueue {
+					for interactiveEmbeddings.Load() > 0 {
+						time.Sleep(25 * time.Millisecond)
+					}
+					generateImageEmbedding(path)
+					embeddingPending.Delete(path)
+				}
+			}()
+		}
 	})
+}
+
+// EnqueueMissingImageEmbeddings backfills images that have no point in
+// Qdrant. It runs asynchronously so enabling AI never blocks HTTP startup.
+func EnqueueMissingImageEmbeddings() {
+	go func() {
+		indexed, err := getQdrantIndexedPaths()
+		if err != nil {
+			log.Printf("[向量] 获取已有索引失败，跳过回填: %v", err)
+			return
+		}
+		queued := 0
+		filepath.WalkDir(dataDir, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				name := entry.Name()
+				if path != dataDir && (strings.HasPrefix(name, ".") || systemExcludes[name]) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !isImageExt(entry.Name()) {
+				return nil
+			}
+			cleanPath := filepath.Clean(path)
+			if _, exists := indexed[cleanPath]; exists {
+				return nil
+			}
+			enqueueImageEmbedding(cleanPath)
+			queued++
+			return nil
+		})
+		log.Printf("[向量] 索引回填已排队 %d 个缺失图片，已有索引 %d 个", queued, len(indexed))
+	}()
 }
 
 func enqueueImageEmbedding(path string) {
@@ -87,21 +166,52 @@ func isDeletedEmbeddingPath(path string) bool {
 	return deleted
 }
 
-// initQdrantCollection 初始化 Qdrant 集合
+// initQdrantCollection creates the collection and replaces incompatible
+// vectors when the configured embedding dimension changes.
 func initQdrantCollection() {
-	// 检查 collection 是否存在
-	resp, err := http.Get(fmt.Sprintf("%s/collections/%s", qdrantURL, collection))
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("%s/collections/%s", qdrantURL, collection))
 	if err == nil && resp.StatusCode == 200 {
+		var current struct {
+			Result struct {
+				Config struct {
+					Params struct {
+						Vectors struct {
+							Size int `json:"size"`
+						} `json:"vectors"`
+					} `json:"params"`
+				} `json:"config"`
+			} `json:"result"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&current)
 		resp.Body.Close()
-		return // 已存在
+		if decodeErr != nil {
+			log.Printf("[Qdrant] 读取集合配置失败: %v", decodeErr)
+			return
+		}
+		currentDimension := current.Result.Config.Params.Vectors.Size
+		if currentDimension == embeddingDimension {
+			return
+		}
+		log.Printf("[Qdrant] 向量维度从 %d 迁移到 %d，重建集合 %s", currentDimension, embeddingDimension, collection)
+		deleteReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/collections/%s", qdrantURL, collection), nil)
+		deleteResp, deleteErr := client.Do(deleteReq)
+		if deleteErr != nil {
+			log.Printf("[Qdrant] 删除旧集合失败: %v", deleteErr)
+			return
+		}
+		deleteResp.Body.Close()
+		if deleteResp.StatusCode >= 300 {
+			log.Printf("[Qdrant] 删除旧集合返回 HTTP %d", deleteResp.StatusCode)
+			return
+		}
+	} else if resp != nil {
+		resp.Body.Close()
 	}
-
-	// Qwen3-VL-Embedding 输出 2048 维向量
-	dim := 2048
 
 	payload := map[string]interface{}{
 		"vectors": map[string]interface{}{
-			"size":     dim,
+			"size":     embeddingDimension,
 			"distance": "Cosine",
 		},
 	}
@@ -109,24 +219,43 @@ func initQdrantCollection() {
 	req, _ := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/collections/%s", qdrantURL, collection), bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
 		log.Printf("[Qdrant] 创建集合失败: %v", err)
 		return
 	}
 	defer res.Body.Close()
-	log.Printf("[Qdrant] 创建集合 %s 成功 (维度: %d)", collection, dim)
+	if res.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(res.Body)
+		log.Printf("[Qdrant] 创建集合返回 HTTP %d: %s", res.StatusCode, strings.TrimSpace(string(responseBody)))
+		return
+	}
+	log.Printf("[Qdrant] 创建集合 %s 成功 (维度: %d)", collection, embeddingDimension)
 }
 
 // getEmbeddingFromPython 调用本地 FastAPI 服务生成向量
 func getEmbeddingFromPython(imagePath string, textQuery string) ([]float32, error) {
+	interactive := textQuery != ""
+	if interactive {
+		interactiveEmbeddings.Add(1)
+		defer interactiveEmbeddings.Add(-1)
+	}
+	if !interactive {
+		for interactiveEmbeddings.Load() > 0 {
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
 	embeddingSlots <- struct{}{}
 	defer func() { <-embeddingSlots }()
 	return getEmbeddingFromPythonUnbounded(imagePath, textQuery)
 }
 
 func getEmbeddingFromPythonUnbounded(imagePath string, textQuery string) ([]float32, error) {
+	timeout := 2 * time.Minute
+	if imagePath != "" {
+		timeout = 10 * time.Minute
+	}
+
 	payload := map[string]interface{}{}
 	if imagePath != "" {
 		payload["image_path"] = imagePath
@@ -134,28 +263,34 @@ func getEmbeddingFromPythonUnbounded(imagePath string, textQuery string) ([]floa
 	if textQuery != "" {
 		payload["text"] = textQuery
 	}
+	return requestEmbedding(embeddingURL, payload, timeout)
+}
 
+func requestEmbedding(endpoint string, payload map[string]interface{}, timeout time.Duration) ([]float32, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request body failed: %v", err)
 	}
-
-	resp, err := http.Post("http://127.0.0.1:8000/embed", "application/json", bytes.NewBuffer(body))
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Post(endpoint, "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		return nil, fmt.Errorf("请求向量服务失败: %v (请确保 FastAPI 服务已启动)", err)
+		return nil, fmt.Errorf("embedding request to %s failed: %v", endpoint, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("向量服务返回错误 (状态码 %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("embedding service %s returned HTTP %d: %s", endpoint, resp.StatusCode, string(respBody))
 	}
 
 	var response struct {
 		Embedding []float32 `json:"embedding"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, fmt.Errorf("解析向量服务响应失败: %v", err)
+		return nil, fmt.Errorf("decode embedding response from %s failed: %v", endpoint, err)
+	}
+	if len(response.Embedding) != embeddingDimension {
+		return nil, fmt.Errorf("embedding service %s returned %d dimensions, expected %d", endpoint, len(response.Embedding), embeddingDimension)
 	}
 
 	return response.Embedding, nil
@@ -170,12 +305,26 @@ func generateImageEmbedding(absPath string) {
 		return
 	}
 	filename := filepath.Base(absPath)
-	vec, err := getEmbeddingFromPython(absPath, "")
+	started := time.Now()
+	duration := func() string {
+		return time.Since(started).Round(time.Millisecond).String()
+	}
+	vectorThumbPath, err := generateVectorThumbnail(absPath)
 	if err != nil {
-		log.Printf("[向量] 获取嵌入失败 %s: %v", filename, err)
+		log.Printf("[向量] 生成专用缩略图失败 %s: %v (耗时: %s)", filename, err, duration())
 		return
 	}
 	if isDeletedEmbeddingPath(absPath) {
+		os.Remove(vectorThumbPath)
+		return
+	}
+	vec, err := getEmbeddingFromPython(vectorThumbPath, "")
+	if err != nil {
+		log.Printf("[向量] 获取嵌入失败 %s: %v (耗时: %s)", filename, err, duration())
+		return
+	}
+	if isDeletedEmbeddingPath(absPath) {
+		os.Remove(vectorThumbPath)
 		return
 	}
 	if _, err := os.Stat(absPath); err != nil {
@@ -191,8 +340,9 @@ func generateImageEmbedding(absPath string) {
 				"id":     id,
 				"vector": vec,
 				"payload": map[string]interface{}{
-					"path": absPath,
-					"name": filename,
+					"path":          absPath,
+					"name":          filename,
+					"vector_source": "thumbnail",
 				},
 			},
 		},
@@ -205,23 +355,25 @@ func generateImageEmbedding(absPath string) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[Qdrant] 存储向量失败 %s: %v", filename, err)
+		log.Printf("[Qdrant] 存储向量失败 %s: %v (耗时: %s)", filename, err, duration())
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		log.Printf("[Qdrant] 存储向量返回错误: %s", string(b))
+		log.Printf("[Qdrant] 存储向量返回错误 %s: %s (耗时: %s)", filename, string(b), duration())
 	} else {
-		log.Printf("[向量] 已成功为照片生成并保存向量: %s", filename)
+		log.Printf("[向量] 已成功为照片生成并保存向量: %s (耗时: %s)", filename, duration())
 	}
 }
 
 type qdrantPathPoint struct {
-	ID      string `json:"id"`
+	ID      string    `json:"id"`
+	Vector  []float32 `json:"vector,omitempty"`
 	Payload struct {
-		Path string `json:"path"`
+		Path         string `json:"path"`
+		VectorSource string `json:"vector_source"`
 	} `json:"payload"`
 }
 
@@ -272,6 +424,48 @@ func qdrantPointIDsForPath(absPath string, recursive bool) ([]string, error) {
 		offset = result.Result.NextPageOffset
 	}
 	return ids, nil
+}
+
+func getQdrantIndexedPaths() (map[string]struct{}, error) {
+	indexed := make(map[string]struct{})
+	var offset json.RawMessage
+	for {
+		payload := map[string]interface{}{
+			"limit":        256,
+			"with_vector":  false,
+			"with_payload": true,
+		}
+		if len(offset) > 0 && string(offset) != "null" {
+			payload["offset"] = offset
+		}
+		body, _ := json.Marshal(payload)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post(fmt.Sprintf("%s/collections/%s/points/scroll", qdrantURL, collection), "application/json", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Result struct {
+				Points         []qdrantPathPoint `json:"points"`
+				NextPageOffset json.RawMessage   `json:"next_page_offset"`
+			} `json:"result"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, point := range result.Result.Points {
+			if point.Payload.Path != "" && point.Payload.VectorSource == "thumbnail" {
+				indexed[filepath.Clean(point.Payload.Path)] = struct{}{}
+			}
+		}
+		if len(result.Result.NextPageOffset) == 0 || string(result.Result.NextPageOffset) == "null" || len(result.Result.Points) == 0 {
+			break
+		}
+		offset = result.Result.NextPageOffset
+	}
+	return indexed, nil
 }
 
 func deleteQdrantPointIDs(ids []string) error {

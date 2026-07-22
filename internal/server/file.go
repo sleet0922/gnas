@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -29,12 +30,16 @@ import (
 var dataDir string
 
 const (
-	thumbnailCacheDirName = "thumbs"
-	thumbnailConcurrency  = 1
-	maxThumbnailPixels    = uint64(40_000_000)
+	thumbnailCacheDirName       = "thumbs"
+	vectorThumbnailCacheDirName = "vector_thumbs"
+	thumbnailConcurrency        = 1
+	vectorThumbnailConcurrency  = 1
+	maxThumbnailPixels          = uint64(40_000_000)
+	vectorThumbnailMaxDimension = 1280
 )
 
 var thumbnailSlots = make(chan struct{}, thumbnailConcurrency)
+var vectorThumbnailSlots = make(chan struct{}, vectorThumbnailConcurrency)
 
 type thumbnailCall struct {
 	done chan struct{}
@@ -43,6 +48,7 @@ type thumbnailCall struct {
 }
 
 var thumbnailCalls sync.Map
+var vectorThumbnailCalls sync.Map
 
 func runThumbnail(srcPath string, generate func() (string, error)) (string, error) {
 	call := &thumbnailCall{done: make(chan struct{})}
@@ -61,11 +67,31 @@ func runThumbnail(srcPath string, generate func() (string, error)) (string, erro
 	return call.path, call.err
 }
 
+func runVectorThumbnail(srcPath string, generate func() (string, error)) (string, error) {
+	call := &thumbnailCall{done: make(chan struct{})}
+	actual, loaded := vectorThumbnailCalls.LoadOrStore(srcPath, call)
+	if loaded {
+		other := actual.(*thumbnailCall)
+		<-other.done
+		return other.path, other.err
+	}
+
+	vectorThumbnailSlots <- struct{}{}
+	call.path, call.err = generate()
+	<-vectorThumbnailSlots
+	close(call.done)
+	vectorThumbnailCalls.Delete(srcPath)
+	return call.path, call.err
+}
+
 var systemExcludes = map[string]bool{
+	"_gnas_migration":   true,
 	".gnas":             true,
 	"gnas":              true,
 	"thumbs":            true,
 	".thumbs":           true,
+	"vector_thumbs":     true,
+	".vector_thumbs":    true,
 	"modelscope_cache":  true,
 	".modelscope_cache": true,
 	"qwen3_env":         true,
@@ -534,6 +560,74 @@ func getVideoThumbCachePath(absPath string) string {
 	return filepath.Join(thumbDir, "sl_"+base+".jpg")
 }
 
+func getVectorThumbCachePath(absPath string) string {
+	thumbDir := filepath.Join(dataDir, internalStorageDir, vectorThumbnailCacheDirName)
+	sum := sha1.Sum([]byte(filepath.Clean(absPath)))
+	return filepath.Join(thumbDir, fmt.Sprintf("vl_%x.jpg", sum[:12]))
+}
+
+func generateVectorThumbnail(srcPath string) (string, error) {
+	return runVectorThumbnail(srcPath, func() (string, error) {
+		return generateVectorThumbnailUnbounded(srcPath)
+	})
+}
+
+func generateVectorThumbnailUnbounded(srcPath string) (string, error) {
+	thumbPath := getVectorThumbCachePath(srcPath)
+	thumbDir := filepath.Dir(thumbPath)
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		return "", err
+	}
+
+	if thumbInfo, err := os.Stat(thumbPath); err == nil {
+		if srcInfo, err := os.Stat(srcPath); err == nil && thumbInfo.ModTime().After(srcInfo.ModTime()) {
+			return thumbPath, nil
+		}
+	}
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return "", fmt.Errorf("ffmpeg is unavailable: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(thumbDir, ".gnas-vector-thumb-*.tmp.jpg")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", err
+	}
+	defer os.Remove(tmpPath)
+
+	scaleFilter := fmt.Sprintf(
+		"scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease:flags=lanczos",
+		vectorThumbnailMaxDimension,
+		vectorThumbnailMaxDimension,
+	)
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
+		"-i", srcPath,
+		"-frames:v", "1",
+		"-vf", scaleFilter,
+		"-q:v", "2",
+		"-y", tmpPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ffmpeg vector thumbnail failed: %v, output: %s", err, strings.TrimSpace(string(output)))
+	}
+	if info, err := os.Stat(tmpPath); err != nil || info.Size() == 0 {
+		if err == nil {
+			err = fmt.Errorf("empty output")
+		}
+		return "", fmt.Errorf("ffmpeg vector thumbnail produced no output: %w", err)
+	}
+	if err := os.Rename(tmpPath, thumbPath); err != nil {
+		return "", err
+	}
+	return thumbPath, nil
+}
+
 // generateVideoThumbnail 使用 ffmpeg 从视频中截取第一帧作为缩略图
 func generateVideoThumbnail(srcPath string) (string, error) {
 	return runThumbnail(srcPath, func() (string, error) {
@@ -898,6 +992,7 @@ func cleanThumbCache(absPath string) {
 	if isImageExt(absPath) {
 		thumbPath := getThumbCachePath(absPath)
 		os.Remove(thumbPath)
+		os.Remove(getVectorThumbCachePath(absPath))
 	} else if isVideoExt(absPath) {
 		thumbPath := getVideoThumbCachePath(absPath)
 		os.Remove(thumbPath)
@@ -1013,8 +1108,11 @@ func HandleFileRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 重命名后重新生成缩略图
+	// Regenerate the display thumbnail and queue a fresh vector thumbnail.
 	go generateThumbForFile(absNew)
+	if isImageExt(absNew) {
+		go enqueueImageEmbedding(absNew)
+	}
 
 	writeOK(w, nil)
 }

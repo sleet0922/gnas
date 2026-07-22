@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"syscall"
 
 	"github.com/jeessy2/gnas/internal/db"
@@ -21,22 +20,20 @@ import (
 var webDist embed.FS
 
 const (
-	listenAddr  = ":8082"
-	dataPath    = "/var/lib/gnas"
-	certFile    = "/ssl/1.pem"
-	keyFile     = "/ssl/1.key"
-	memoryLimit = int64(768 << 20)
+	listenAddr = ":8082"
+	dataPath   = "/var/lib/gnas"
+	certFile   = "/ssl/1.pem"
+	keyFile    = "/ssl/1.key"
 )
 
 var version = "DEV"
 
 func main() {
-	debug.SetMemoryLimit(memoryLimit)
-
 	// 初始化数据目录
 	dataDir := filepath.Clean(dataPath)
 	os.MkdirAll(dataDir, 0755)
 	server.InitDataDir(dataDir)
+	server.EnsureSystemdService()
 
 	// 检查并安装 ffmpeg
 	server.CheckAndInstallFFmpeg()

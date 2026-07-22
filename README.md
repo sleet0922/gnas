@@ -127,8 +127,8 @@ GNAS 后端支持以下命令行参数：
 
 ## 相册 ZIP 备份
 
-- `GET /api/gallery/export`：将用户文件压缩为 ZIP 下载。数据库、缩略图缓存和运行时目录不会被导出。
-- `POST /api/gallery/import`：使用 `multipart/form-data` 的 `file` 字段上传 ZIP，文件会按 ZIP 内相对路径恢复到数据目录；服务端会拒绝目录穿越、符号链接和受保护目录。
+- `GET /api/gallery/export`：将用户文件、显示缩略图、向量专用缩略图和 Qdrant 向量压缩为可迁移 ZIP。模型、运行环境、数据库和凭据不会被导出。
+- `POST /api/gallery/import`：使用 `multipart/form-data` 的 `file` 字段上传 ZIP。新格式备份会恢复文件、两套缩略图并将向量路径映射到当前数据目录后写回 Qdrant；旧格式 ZIP 仍可导入。服务端会拒绝目录穿越、符号链接和受保护目录。
 
 ## 文件夹整理
 

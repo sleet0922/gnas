@@ -1,126 +1,129 @@
-import argparse
-import sys
 import os
+import sys
+
 import torch
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from transformers import AutoProcessor, AutoModel
-from PIL import Image
 from modelscope import snapshot_download
+from pydantic import BaseModel
+
+from qwen3_vl_embedding import Qwen3VLEmbedder
+
+
+MODEL_ID = "Qwen/Qwen3-VL-Embedding-2B"
+EMBEDDING_DIMENSION = 2048
 
 app = FastAPI()
-
-# Global model and processor
-model = None
-processor = None
+embedder = None
 device = "cpu"
 
-# Keep the model from competing with the HTTP service and thumbnail workers.
-torch.set_num_threads(1)
+
+def _system_memory_bytes():
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        return page_size * page_count
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+_cpu_count = os.cpu_count() or 1
+_total_memory = _system_memory_bytes()
+_memory_concurrency = 1
+if _total_memory > (4 << 30):
+    _memory_concurrency = max(1, int((_total_memory - (4 << 30)) // (2 << 30)))
+_request_concurrency = max(1, min(_memory_concurrency, max(1, _cpu_count // 4)))
+
+try:
+    _embed_threads = int(os.environ.get("GNAS_EMBED_THREADS", "0"))
+except ValueError:
+    _embed_threads = 0
+if _embed_threads <= 0:
+    _embed_threads = max(1, _cpu_count // _request_concurrency)
+torch.set_num_threads(_embed_threads)
 torch.set_num_interop_threads(1)
+
 
 class EmbedRequest(BaseModel):
     image_path: str = None
     text: str = None
 
-def last_token_pool(last_hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    left_padding = attention_mask[:, -1].sum() == attention_mask.shape[0]
-    if left_padding:
-        return last_hidden_states[:, -1]
-    sequence_lengths = attention_mask.sum(dim=1) - 1
-    batch_size = last_hidden_states.shape[0]
-    return last_hidden_states[torch.arange(batch_size, device=last_hidden_states.device), sequence_lengths]
 
 @app.on_event("startup")
 def load_model():
-    global model, processor, device
+    global embedder, device
     try:
-        model_id = "Qwen/Qwen3-VL-Embedding-2B"
-        print(f"Loading model {model_id} from ModelScope...")
-        
-        # Ensure model is cached
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        default_data_dir = os.path.dirname(current_dir) # qwen3_vl_ov's parent
+        default_data_dir = os.path.dirname(current_dir)
         default_cache_dir = os.path.join(default_data_dir, "modelscope_cache")
         cache_dir = os.environ.get("MODELSCOPE_CACHE", default_cache_dir)
         os.makedirs(cache_dir, exist_ok=True)
-        local_dir = snapshot_download(model_id, cache_dir=cache_dir)
-        
-        # Load processor & model
-        processor = AutoProcessor.from_pretrained(local_dir, trust_remote_code=True)
-        model = AutoModel.from_pretrained(local_dir, trust_remote_code=True).eval()
-        
-        if torch.cuda.is_available():
-            device = "cuda"
-            model = model.to(device)
-            print("Loaded model to GPU (CUDA)")
-        else:
-            device = "cpu"
-            print("Loaded model to CPU")
-            
-    except Exception as e:
-        print(f"Error loading model: {e}", file=sys.stderr)
-        # We don't exit to allow FastAPI to start and report health error or reload
-        raise e
+
+        print(f"Loading model {MODEL_ID} from ModelScope...")
+        local_dir = snapshot_download(MODEL_ID, cache_dir=cache_dir)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Keep the published BF16 weights to avoid doubling the 2B model in RAM.
+        embedder = Qwen3VLEmbedder(
+            model_name_or_path=local_dir,
+            torch_dtype=torch.bfloat16,
+        )
+        print(
+            f"Loaded {MODEL_ID} on {device}; dimension={EMBEDDING_DIMENSION}, "
+            f"concurrency={_request_concurrency}, threads={_embed_threads}"
+        )
+    except Exception as exc:
+        print(f"Error loading model: {exc}", file=sys.stderr)
+        raise
+
 
 @app.get("/health")
 def health():
-    if model is None or processor is None:
+    if embedder is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
-    return {"status": "ok", "device": device}
+    return {
+        "status": "ok",
+        "device": device,
+        "model": MODEL_ID,
+        "dimension": EMBEDDING_DIMENSION,
+        "request_concurrency": _request_concurrency,
+        "threads_per_request": _embed_threads,
+    }
+
 
 @app.post("/embed")
 def embed(req: EmbedRequest):
-    if model is None or processor is None:
+    if embedder is None:
         raise HTTPException(status_code=503, detail="Model not initialized")
-        
-    try:
-        content = []
-        if req.image_path:
-            if not os.path.exists(req.image_path):
-                raise HTTPException(status_code=400, detail=f"Image not found: {req.image_path}")
-            content.append({"type": "image", "image": req.image_path})
-            
-        if req.text:
-            content.append({"type": "text", "text": req.text})
-            
-        if not content:
-            raise HTTPException(status_code=400, detail="Must provide either image_path or text")
+    if not req.image_path and not req.text:
+        raise HTTPException(status_code=400, detail="Must provide either image_path or text")
+    if req.image_path and not os.path.exists(req.image_path):
+        raise HTTPException(status_code=400, detail=f"Image not found: {req.image_path}")
 
-        from qwen_vl_utils import process_vision_info
-        
-        conversation = [
-            {"role": "system", "content": [{"type": "text", "text": "Represent the input."}]},
-            {"role": "user", "content": content}
-        ]
-        
-        prompt = processor.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
-        image_inputs, video_inputs = process_vision_info(conversation)
-        
-        inputs = processor(
-            text=[prompt], 
-            images=image_inputs, 
-            videos=video_inputs, 
-            padding=True, 
-            return_tensors="pt"
-        )
-        
-        # Move to GPU if available
-        inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-        
+    try:
+        item = {}
+        if req.text:
+            item["text"] = req.text
+        if req.image_path:
+            item["image"] = req.image_path
+        if req.image_path and req.text:
+            item["instruction"] = "Represent the multimodal input for image retrieval."
+        elif req.image_path:
+            item["instruction"] = "Represent the image for retrieval."
+        else:
+            item["instruction"] = "Find an image that matches the user's query."
+
         with torch.inference_mode():
-            outputs = model(**inputs)
-            
-        emb = last_token_pool(outputs.last_hidden_state, inputs["attention_mask"])[0]
-        emb = emb / torch.norm(emb, p=2, dim=-1, keepdim=True)
-        
-        return {"embedding": emb.tolist()}
-        
-    except Exception as e:
+            vector = embedder.process([item])[0].float().cpu().tolist()
+        return {"embedding": vector}
+    except HTTPException:
+        raise
+    except Exception as exc:
         import traceback
+
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=8000)

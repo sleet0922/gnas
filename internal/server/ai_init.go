@@ -36,6 +36,9 @@ func runAICommand(timeout time.Duration, env []string, name string, args ...stri
 //go:embed embed_server.py
 var embedServerCode string
 
+//go:embed qwen3_vl_embedding.py
+var qwen3VLEmbeddingCode string
+
 const (
 	internalStorageDir = ".gnas"
 	modelCacheDir      = "modelscope_cache"
@@ -141,7 +144,7 @@ func repairVirtualEnvPaths(envPath string) {
 	}
 }
 
-// CheckAndInstallAI 检测并安装 Ollama 和 Qdrant
+// CheckAndInstallAI detects and starts the embedding service and Qdrant.
 func CheckAndInstallAI() {
 	migrateAIStorageDirs()
 	go func() {
@@ -230,18 +233,18 @@ func checkAndInstallPythonVLM() {
 		log.Printf("[AI 初始化] 写入 embed_server.py 失败: %v", err)
 		return
 	}
+	helperPath := filepath.Join(modelDir, "qwen3_vl_embedding.py")
+	if err := os.WriteFile(helperPath, []byte(qwen3VLEmbeddingCode), 0644); err != nil {
+		log.Printf("[AI 初始化] 写入 qwen3_vl_embedding.py 失败: %v", err)
+		return
+	}
 
 	// 6. 后台启动 FastAPI 服务
 	serverCmd := exec.Command(pythonPath, embedPath)
 	serverCmd.Dir = modelDir
 	serverCmd.Env = append(os.Environ(),
 		"MODELSCOPE_CACHE="+aiStoragePath(modelCacheDir),
-		"OMP_NUM_THREADS=1",
-		"MKL_NUM_THREADS=1",
-		"OPENBLAS_NUM_THREADS=1",
-		"NUMEXPR_NUM_THREADS=1",
 		"TOKENIZERS_PARALLELISM=false",
-		"HF_HUB_DISABLE_TELEMETRY=1",
 	)
 
 	// 重定向输出到日志文件
@@ -257,8 +260,8 @@ func checkAndInstallPythonVLM() {
 		return
 	}
 
-	// 7. 等待加载成功 (可能需要从 ModelScope 下载 4GB 的模型，给足时间)
-	log.Println("[AI 初始化] 正在下载并加载官方 Qwen3-VL-Embedding-2B 模型，首次拉起大约需要几分钟，请耐心等待...")
+	// 7. Wait for the ModelScope model download and initial load.
+	log.Println("[AI 初始化] 正在下载并加载 Qwen3-VL-Embedding-2B，首次启动需要几分钟...")
 	success := false
 	for i := 0; i < 450; i++ { // 最多等待 15 分钟 (450 * 2 秒)
 		time.Sleep(2 * time.Second)
@@ -287,6 +290,7 @@ func checkAndInstallQdrant() {
 		resp.Body.Close()
 		log.Println("[AI 初始化] 已检测到 Qdrant 运行在 6333 端口。")
 		initQdrantCollection()
+		EnqueueMissingImageEmbeddings()
 		return
 	}
 
@@ -343,6 +347,7 @@ func checkAndInstallQdrant() {
 			return
 		}
 		initQdrantCollection()
+		EnqueueMissingImageEmbeddings()
 	} else {
 		log.Printf("[AI 初始化] 当前系统为 %s，请手动安装 Qdrant (推荐使用 Docker: docker run -p 6333:6333 qdrant/qdrant)", runtime.GOOS)
 	}
