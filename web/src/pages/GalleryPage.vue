@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch, reactive } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, reactive, nextTick } from 'vue'
 import { apiGet, apiPost, apiImportGallery, getAuthImageUrl, getAuthDownloadUrl, getAuthGalleryExportUrl, type MediaItem } from '@/composables/useApi'
 
 const items = ref<MediaItem[]>([])
@@ -30,6 +30,59 @@ const filteredItems = computed(() => {
 const imageCount = computed(() => items.value.filter(i => i.type === 'image').length)
 const videoCount = computed(() => items.value.filter(i => i.type === 'video').length)
 
+const galleryViewport = ref<HTMLElement | null>(null)
+const galleryScrollTop = ref(0)
+const galleryViewportHeight = ref(600)
+const galleryViewportWidth = ref(800)
+const galleryGap = 12
+const galleryMinCardWidth = 160
+const galleryOverscanRows = 2
+
+const galleryColumns = computed(() => {
+  const width = galleryViewportWidth.value
+  return Math.max(2, Math.floor((width + galleryGap) / (galleryMinCardWidth + galleryGap)))
+})
+
+const galleryCardWidth = computed(() => {
+  const width = galleryViewportWidth.value
+  return Math.max(120, (width - galleryGap * (galleryColumns.value - 1)) / galleryColumns.value)
+})
+
+const galleryRowHeight = computed(() => Math.round(galleryCardWidth.value + 36))
+const galleryRowPitch = computed(() => galleryRowHeight.value + galleryGap)
+const galleryTotalRows = computed(() => Math.ceil(filteredItems.value.length / galleryColumns.value))
+const galleryStartRow = computed(() => Math.max(0, Math.floor(galleryScrollTop.value / galleryRowPitch.value) - galleryOverscanRows))
+const galleryEndRow = computed(() => Math.min(
+  galleryTotalRows.value,
+  Math.ceil((galleryScrollTop.value + galleryViewportHeight.value) / galleryRowPitch.value) + galleryOverscanRows,
+))
+const galleryVisibleItems = computed(() => filteredItems.value.slice(
+  galleryStartRow.value * galleryColumns.value,
+  galleryEndRow.value * galleryColumns.value,
+))
+const galleryTopOffset = computed(() => galleryStartRow.value * galleryRowPitch.value)
+const galleryBottomOffset = computed(() => Math.max(
+  0,
+  (galleryTotalRows.value - galleryEndRow.value) * galleryRowPitch.value,
+))
+
+let galleryResizeObserver: ResizeObserver | null = null
+
+function measureGalleryViewport() {
+  if (!galleryViewport.value) return
+  galleryViewportWidth.value = galleryViewport.value.clientWidth
+  galleryViewportHeight.value = galleryViewport.value.clientHeight
+}
+
+function onGalleryScroll(event: Event) {
+  galleryScrollTop.value = (event.currentTarget as HTMLElement).scrollTop
+}
+
+function resetGalleryScroll() {
+  galleryScrollTop.value = 0
+  if (galleryViewport.value) galleryViewport.value.scrollTop = 0
+}
+
 const searchQuery = ref('')
 const isSearching = ref(false)
 const aiEnabled = ref(false)
@@ -50,6 +103,7 @@ async function handleSearch() {
   try {
     const data = await apiGet<MediaItem[]>('/api/search?q=' + encodeURIComponent(query))
     items.value = data || []
+    nextTick(resetGalleryScroll)
   } catch (e: any) {
     alert(e.message || '搜索失败')
   } finally {
@@ -70,6 +124,10 @@ watch(searchQuery, (newVal) => {
   }
 })
 
+watch(filter, () => {
+  nextTick(resetGalleryScroll)
+})
+
 async function loadGallery() {
   loading.value = true
   const data = await apiGet<MediaItem[]>('/api/gallery')
@@ -77,6 +135,7 @@ async function loadGallery() {
   loading.value = false
   selectMode.value = false
   selectedPaths.value.clear()
+  nextTick(resetGalleryScroll)
 }
 
 function exportGallery() {
@@ -179,10 +238,17 @@ function runContextAction(action: 'preview' | 'download' | 'delete') {
 
 // 删除单个
 async function deleteItem(item: MediaItem) {
+  const previousScrollTop = galleryViewport.value?.scrollTop ?? galleryScrollTop.value
   try {
     await apiPost('/api/files/delete', { path: item.path })
     items.value = items.value.filter(i => i.path !== item.path)
     if (previewItem.value?.path === item.path) closePreview()
+    await nextTick()
+    if (galleryViewport.value) {
+      const maxScrollTop = galleryViewport.value.scrollHeight - galleryViewport.value.clientHeight
+      galleryViewport.value.scrollTop = Math.min(previousScrollTop, Math.max(0, maxScrollTop))
+      galleryScrollTop.value = galleryViewport.value.scrollTop
+    }
   } catch (e: unknown) {
     alert(e instanceof Error ? e.message : '删除失败')
   }
@@ -216,12 +282,19 @@ async function batchDelete() {
 }
 
 async function confirmBatchDelete() {
+  const previousScrollTop = galleryViewport.value?.scrollTop ?? galleryScrollTop.value
   try {
     await apiPost('/api/files/batch-delete', { paths: Array.from(selectedPaths.value) })
     items.value = items.value.filter(i => !selectedPaths.value.has(i.path))
     selectedPaths.value.clear()
     batchDeleteDialog.value = false
     selectMode.value = false
+    await nextTick()
+    if (galleryViewport.value) {
+      const maxScrollTop = galleryViewport.value.scrollHeight - galleryViewport.value.clientHeight
+      galleryViewport.value.scrollTop = Math.min(previousScrollTop, Math.max(0, maxScrollTop))
+      galleryScrollTop.value = galleryViewport.value.scrollTop
+    }
   } catch (e: unknown) {
     alert(e instanceof Error ? e.message : '批量删除失败')
     batchDeleteDialog.value = false
@@ -232,6 +305,13 @@ async function confirmBatchDelete() {
 onMounted(() => {
   loadGallery()
   checkAISettings()
+  nextTick(() => {
+    measureGalleryViewport()
+    if (galleryViewport.value) {
+      galleryResizeObserver = new ResizeObserver(measureGalleryViewport)
+      galleryResizeObserver.observe(galleryViewport.value)
+    }
+  })
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('click', closeContextMenu)
   window.addEventListener('scroll', closeContextMenu, true)
@@ -239,6 +319,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  galleryResizeObserver?.disconnect()
+  galleryResizeObserver = null
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('click', closeContextMenu)
   window.removeEventListener('scroll', closeContextMenu, true)
@@ -299,9 +381,18 @@ onUnmounted(() => {
     </div>
 
     <!-- 网格布局 -->
-    <div v-else class="gallery-grid">
+    <div v-else ref="galleryViewport" class="gallery-viewport" @scroll="onGalleryScroll">
+      <div aria-hidden="true" :style="{ height: `${galleryTopOffset}px` }" />
       <div
-        v-for="item in filteredItems"
+        class="gallery-grid"
+        :style="{
+          gridTemplateColumns: `repeat(${galleryColumns}, minmax(0, 1fr))`,
+          gridAutoRows: `${galleryRowHeight}px`,
+          '--gallery-row-height': `${galleryRowHeight}px`,
+        }"
+      >
+      <div
+        v-for="item in galleryVisibleItems"
         :key="item.path"
         class="gallery-item"
         :class="{ 'gallery-selected': selectMode && selectedPaths.has(item.path) }"
@@ -340,6 +431,8 @@ onUnmounted(() => {
           </v-btn>
         </div>
       </div>
+      </div>
+      <div aria-hidden="true" :style="{ height: `${galleryBottomOffset}px` }" />
     </div>
 
     <div
@@ -427,12 +520,21 @@ onUnmounted(() => {
 <style scoped>
 .gallery-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 12px;
+}
+
+.gallery-viewport {
+  height: calc(100vh - 220px);
+  min-height: 320px;
+  overflow: auto;
+  contain: strict;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .gallery-item {
   cursor: pointer;
+  height: var(--gallery-row-height, 196px);
   border-radius: 8px;
   overflow: hidden;
   background: rgb(var(--v-theme-surface-variant));
@@ -459,9 +561,18 @@ onUnmounted(() => {
 
 .gallery-thumb {
   width: 100%;
-  aspect-ratio: 1;
+  height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.gallery-item > .gallery-thumb,
+.gallery-item > .gallery-video-thumb {
+  height: calc(100% - 32px);
+}
+
+.gallery-video-thumb > .gallery-thumb {
+  height: 100%;
 }
 
 .gallery-video-thumb {

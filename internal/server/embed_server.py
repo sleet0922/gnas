@@ -15,6 +15,10 @@ model = None
 processor = None
 device = "cpu"
 
+# Keep the model from competing with the HTTP service and thumbnail workers.
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+
 class EmbedRequest(BaseModel):
     image_path: str = None
     text: str = None
@@ -104,7 +108,7 @@ def embed(req: EmbedRequest):
         # Move to GPU if available
         inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
         
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = model(**inputs)
             
         emb = last_token_pool(outputs.last_hidden_state, inputs["attention_mask"])[0]

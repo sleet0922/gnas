@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jeessy2/gnas/internal/db"
@@ -26,10 +28,11 @@ const (
 const embeddingQueueSize = 8
 
 var (
-	embeddingSlots   = make(chan struct{}, 1)
-	embeddingQueue   = make(chan string, embeddingQueueSize)
-	embeddingPending sync.Map
-	embeddingOnce    sync.Once
+	embeddingSlots        = make(chan struct{}, 1)
+	embeddingQueue        = make(chan string, embeddingQueueSize)
+	embeddingPending      sync.Map
+	deletedEmbeddingPaths sync.Map
+	embeddingOnce         sync.Once
 )
 
 func startEmbeddingWorker() {
@@ -44,6 +47,7 @@ func startEmbeddingWorker() {
 }
 
 func enqueueImageEmbedding(path string) {
+	clearDeletedEmbeddingPath(path)
 	if enabled, err := db.GetSetting("ai_enabled"); err != nil || enabled != "true" {
 		return
 	}
@@ -52,6 +56,35 @@ func enqueueImageEmbedding(path string) {
 	}
 	startEmbeddingWorker()
 	embeddingQueue <- path
+}
+
+func markDeletedEmbeddingPath(path string) {
+	deletedEmbeddingPaths.Store(filepath.Clean(path), struct{}{})
+}
+
+func clearDeletedEmbeddingPath(path string) {
+	path = filepath.Clean(path)
+	deletedEmbeddingPaths.Range(func(key, _ interface{}) bool {
+		deletedPath := key.(string)
+		if path == deletedPath || strings.HasPrefix(path, deletedPath+string(filepath.Separator)) {
+			deletedEmbeddingPaths.Delete(key)
+		}
+		return true
+	})
+}
+
+func isDeletedEmbeddingPath(path string) bool {
+	path = filepath.Clean(path)
+	deleted := false
+	deletedEmbeddingPaths.Range(func(key, _ interface{}) bool {
+		deletedPath := key.(string)
+		if path == deletedPath || strings.HasPrefix(path, deletedPath+string(filepath.Separator)) {
+			deleted = true
+			return false
+		}
+		return true
+	})
+	return deleted
 }
 
 // initQdrantCollection 初始化 Qdrant 集合
@@ -130,10 +163,22 @@ func getEmbeddingFromPythonUnbounded(imagePath string, textQuery string) ([]floa
 
 // generateImageEmbedding 为图片生成向量并存入 Qdrant
 func generateImageEmbedding(absPath string) {
+	if isDeletedEmbeddingPath(absPath) {
+		return
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		return
+	}
 	filename := filepath.Base(absPath)
 	vec, err := getEmbeddingFromPython(absPath, "")
 	if err != nil {
 		log.Printf("[向量] 获取嵌入失败 %s: %v", filename, err)
+		return
+	}
+	if isDeletedEmbeddingPath(absPath) {
+		return
+	}
+	if _, err := os.Stat(absPath); err != nil {
 		return
 	}
 
@@ -170,6 +215,108 @@ func generateImageEmbedding(absPath string) {
 		log.Printf("[Qdrant] 存储向量返回错误: %s", string(b))
 	} else {
 		log.Printf("[向量] 已成功为照片生成并保存向量: %s", filename)
+	}
+}
+
+type qdrantPathPoint struct {
+	ID      string `json:"id"`
+	Payload struct {
+		Path string `json:"path"`
+	} `json:"payload"`
+}
+
+func qdrantPointIDsForPath(absPath string, recursive bool) ([]string, error) {
+	target := filepath.Clean(absPath)
+	var ids []string
+	var offset json.RawMessage
+
+	for {
+		payload := map[string]interface{}{
+			"limit":        256,
+			"with_vector":  false,
+			"with_payload": true,
+		}
+		if len(offset) > 0 && string(offset) != "null" {
+			payload["offset"] = offset
+		}
+		body, _ := json.Marshal(payload)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post(fmt.Sprintf("%s/collections/%s/points/scroll", qdrantURL, collection), "application/json", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Result struct {
+				Points         []qdrantPathPoint `json:"points"`
+				NextPageOffset json.RawMessage   `json:"next_page_offset"`
+			} `json:"result"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, point := range result.Result.Points {
+			pointPath := filepath.Clean(point.Payload.Path)
+			matches := pointPath == target
+			if recursive {
+				matches = matches || strings.HasPrefix(pointPath, target+string(filepath.Separator))
+			}
+			if matches && point.ID != "" {
+				ids = append(ids, point.ID)
+			}
+		}
+		if len(result.Result.NextPageOffset) == 0 || string(result.Result.NextPageOffset) == "null" || len(result.Result.Points) == 0 {
+			break
+		}
+		offset = result.Result.NextPageOffset
+	}
+	return ids, nil
+}
+
+func deleteQdrantPointIDs(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]interface{}{"points": ids})
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/collections/%s/points?wait=true", qdrantURL, collection), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Qdrant returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	return nil
+}
+
+func deleteQdrantVectorsForPath(absPath string, recursive bool) {
+	markDeletedEmbeddingPath(absPath)
+
+	var ids []string
+	var err error
+	if recursive {
+		ids, err = qdrantPointIDsForPath(absPath, true)
+	} else {
+		ids = []string{uuid.NewMD5(uuid.NameSpaceURL, []byte(absPath)).String()}
+	}
+	if err != nil {
+		log.Printf("[Qdrant] 获取待删除向量失败 %s: %v", absPath, err)
+		return
+	}
+	if err := deleteQdrantPointIDs(ids); err != nil {
+		log.Printf("[Qdrant] 删除向量失败 %s: %v", absPath, err)
+		return
+	}
+	if len(ids) > 0 {
+		log.Printf("[Qdrant] 已删除 %d 个媒体向量: %s", len(ids), absPath)
 	}
 }
 

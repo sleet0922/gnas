@@ -234,7 +234,15 @@ func checkAndInstallPythonVLM() {
 	// 6. 后台启动 FastAPI 服务
 	serverCmd := exec.Command(pythonPath, embedPath)
 	serverCmd.Dir = modelDir
-	serverCmd.Env = append(os.Environ(), "MODELSCOPE_CACHE="+aiStoragePath(modelCacheDir))
+	serverCmd.Env = append(os.Environ(),
+		"MODELSCOPE_CACHE="+aiStoragePath(modelCacheDir),
+		"OMP_NUM_THREADS=1",
+		"MKL_NUM_THREADS=1",
+		"OPENBLAS_NUM_THREADS=1",
+		"NUMEXPR_NUM_THREADS=1",
+		"TOKENIZERS_PARALLELISM=false",
+		"HF_HUB_DISABLE_TELEMETRY=1",
+	)
 
 	// 重定向输出到日志文件
 	logFile, err := os.OpenFile(aiStoragePath(logFileName), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)

@@ -864,20 +864,37 @@ func HandleFileDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "不能删除根目录")
 		return
 	}
+	info, statErr := os.Stat(absPath)
+	wasDir := statErr == nil && info.IsDir()
+	markDeletedEmbeddingPath(absPath)
 
 	// 清理缩略图缓存
 	cleanThumbCache(absPath)
 
 	if err := os.RemoveAll(absPath); err != nil {
+		clearDeletedEmbeddingPath(absPath)
 		writeError(w, "删除失败")
 		return
 	}
+	deleteQdrantVectorsForPath(absPath, wasDir)
 
 	writeOK(w, nil)
 }
 
 // cleanThumbCache 清理文件对应的缩略图缓存
 func cleanThumbCache(absPath string) {
+	if info, err := os.Stat(absPath); err == nil && info.IsDir() {
+		_ = filepath.WalkDir(absPath, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if !entry.IsDir() {
+				cleanThumbCache(path)
+			}
+			return nil
+		})
+		return
+	}
 	if isImageExt(absPath) {
 		thumbPath := getThumbCachePath(absPath)
 		os.Remove(thumbPath)
@@ -913,10 +930,16 @@ func HandleFileBatchDelete(w http.ResponseWriter, r *http.Request) {
 			failed = append(failed, p)
 			continue
 		}
+		info, statErr := os.Stat(absPath)
+		wasDir := statErr == nil && info.IsDir()
+		markDeletedEmbeddingPath(absPath)
 		cleanThumbCache(absPath)
 		if err := os.RemoveAll(absPath); err != nil {
+			clearDeletedEmbeddingPath(absPath)
 			failed = append(failed, p)
+			continue
 		}
+		deleteQdrantVectorsForPath(absPath, wasDir)
 	}
 
 	if len(failed) > 0 {
@@ -982,8 +1005,10 @@ func HandleFileRename(w http.ResponseWriter, r *http.Request) {
 
 	// 清理旧缩略图缓存
 	cleanThumbCache(absOld)
+	deleteQdrantVectorsForPath(absOld, false)
 
 	if err := os.Rename(absOld, absNew); err != nil {
+		clearDeletedEmbeddingPath(absOld)
 		writeError(w, "重命名失败")
 		return
 	}

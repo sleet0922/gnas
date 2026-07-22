@@ -1,10 +1,64 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, reactive } from 'vue'
+import { ref, onMounted, onUnmounted, computed, reactive, nextTick } from 'vue'
 import { apiGet, apiPost, apiUpload, getAuthImageUrl, getAuthDownloadUrl, type FileItem } from '@/composables/useApi'
 
 const files = ref<FileItem[]>([])
 const currentPath = ref('/')
 const loading = ref(true)
+
+type FileVirtualRow = { isUp: boolean; item: FileItem | null }
+const fileViewport = ref<HTMLElement | null>(null)
+const fileScrollTop = ref(0)
+const fileViewportHeight = ref(600)
+const fileRowHeight = 68
+const fileOverscanRows = 5
+const fileTotalRows = computed(() => files.value.length + (currentPath.value === '/' ? 0 : 1))
+const fileStartRow = computed(() => Math.max(0, Math.floor(fileScrollTop.value / fileRowHeight) - fileOverscanRows))
+const fileEndRow = computed(() => Math.min(
+  fileTotalRows.value,
+  Math.ceil((fileScrollTop.value + fileViewportHeight.value) / fileRowHeight) + fileOverscanRows,
+))
+const fileVisibleRows = computed<FileVirtualRow[]>(() => {
+  const rows: FileVirtualRow[] = []
+  const hasUpRow = currentPath.value !== '/'
+  for (let row = fileStartRow.value; row < fileEndRow.value; row++) {
+    if (hasUpRow && row === 0) {
+      rows.push({ isUp: true, item: null })
+      continue
+    }
+    const item = files.value[row - (hasUpRow ? 1 : 0)]
+    if (item) rows.push({ isUp: false, item })
+  }
+  return rows
+})
+const fileShowUp = computed(() => currentPath.value !== '/' && fileStartRow.value === 0)
+const fileVisibleItems = computed(() => fileVisibleRows.value
+  .filter(row => !row.isUp)
+  .map(row => row.item as FileItem))
+const fileTopOffset = computed(() => fileStartRow.value * fileRowHeight)
+const fileBottomOffset = computed(() => Math.max(0, (fileTotalRows.value - fileEndRow.value) * fileRowHeight))
+let fileResizeObserver: ResizeObserver | null = null
+
+function measureFileViewport() {
+  if (!fileViewport.value) return
+  fileViewportHeight.value = fileViewport.value.clientHeight
+}
+
+function onFileScroll(event: Event) {
+  fileScrollTop.value = (event.currentTarget as HTMLElement).scrollTop
+}
+
+function resetFileScroll() {
+  fileScrollTop.value = 0
+  if (fileViewport.value) fileViewport.value.scrollTop = 0
+}
+
+function restoreFileScroll(scrollTop: number) {
+  if (!fileViewport.value) return
+  const maxScrollTop = fileViewport.value.scrollHeight - fileViewport.value.clientHeight
+  fileViewport.value.scrollTop = Math.min(scrollTop, Math.max(0, maxScrollTop))
+  fileScrollTop.value = fileViewport.value.scrollTop
+}
 const snackbar = ref(false)
 const snackbarText = ref('')
 const uploadInput = ref<HTMLInputElement>()
@@ -87,13 +141,15 @@ function openPreview(item: FileItem) {
   previewDialog.value = true
 }
 
-async function loadFiles(dir?: string) {
+async function loadFiles(dir?: string, preserveScroll = false) {
+  const previousScrollTop = fileViewport.value?.scrollTop ?? fileScrollTop.value
   loading.value = true
   const path = dir ?? currentPath.value
   const data = await apiGet<FileItem[]>('/api/files?path=' + encodeURIComponent(path))
   files.value = data || []
   currentPath.value = path
   loading.value = false
+  nextTick(() => preserveScroll ? restoreFileScroll(previousScrollTop) : resetFileScroll())
   // 退出选择模式
   selectMode.value = false
   selectedPaths.value.clear()
@@ -135,7 +191,7 @@ async function deleteItem(item: FileItem) {
   try {
     await apiPost('/api/files/delete', { path: item.path })
     showMsg('已删除: ' + item.name)
-    loadFiles()
+    loadFiles(undefined, true)
   } catch (e: unknown) {
     showMsg(e instanceof Error ? e.message : '删除失败')
   }
@@ -173,11 +229,11 @@ async function confirmBatchDelete() {
     await apiPost('/api/files/batch-delete', { paths: Array.from(selectedPaths.value) })
     showMsg(`已删除 ${selectedPaths.value.size} 个文件`)
     batchDeleteDialog.value = false
-    loadFiles()
+    loadFiles(undefined, true)
   } catch (e: unknown) {
     showMsg(e instanceof Error ? e.message : '批量删除失败')
     batchDeleteDialog.value = false
-    loadFiles()
+    loadFiles(undefined, true)
   }
 }
 
@@ -191,7 +247,7 @@ async function createFolder() {
     mkdirDialog.value = false
     newFolderName.value = ''
     showMsg('文件夹已创建')
-    loadFiles()
+    loadFiles(undefined, true)
   } catch (e: unknown) {
     showMsg(e instanceof Error ? e.message : '创建失败')
   }
@@ -209,7 +265,7 @@ async function doRename() {
     await apiPost('/api/files/rename', { oldPath: renameTarget.value.path, newName: renameName.value })
     renameDialog.value = false
     showMsg('重命名成功')
-    loadFiles()
+    loadFiles(undefined, true)
   } catch (e: unknown) {
     showMsg(e instanceof Error ? e.message : '重命名失败')
   }
@@ -300,12 +356,21 @@ async function onFileChange(e: Event) {
 
 onMounted(() => {
   loadFiles()
+  nextTick(() => {
+    measureFileViewport()
+    if (fileViewport.value) {
+      fileResizeObserver = new ResizeObserver(measureFileViewport)
+      fileResizeObserver.observe(fileViewport.value)
+    }
+  })
   window.addEventListener('click', closeContextMenu)
   window.addEventListener('scroll', closeContextMenu, true)
   window.addEventListener('keydown', onContextKeydown)
 })
 
 onUnmounted(() => {
+  fileResizeObserver?.disconnect()
+  fileResizeObserver = null
   window.removeEventListener('click', closeContextMenu)
   window.removeEventListener('scroll', closeContextMenu, true)
   window.removeEventListener('keydown', onContextKeydown)
@@ -351,14 +416,17 @@ onUnmounted(() => {
       <div v-else-if="files.length === 0" class="text-center text-medium-emphasis pa-8">
         空文件夹
       </div>
-      <v-list v-else density="comfortable">
-        <v-list-item v-if="currentPath !== '/'" @click="goUp" class="text-medium-emphasis">
+      <div v-else ref="fileViewport" class="file-viewport" @scroll="onFileScroll">
+        <div aria-hidden="true" :style="{ height: `${fileTopOffset}px` }" />
+        <v-list density="comfortable" class="file-list">
+        <v-list-item v-if="fileShowUp" @click="goUp" class="file-list-item text-medium-emphasis">
           <template #prepend><v-icon>mdi-arrow-up</v-icon></template>
           <v-list-item-title>..</v-list-item-title>
         </v-list-item>
         <v-list-item
-          v-for="item in files"
+          v-for="item in fileVisibleItems"
           :key="item.path"
+          class="file-list-item"
           @click="enterDir(item)"
           @contextmenu.prevent.stop="openContextMenu($event, item)"
           :class="{ 'bg-primary-lighten-5': selectMode && selectedPaths.has(item.path) }"
@@ -402,7 +470,9 @@ onUnmounted(() => {
             </v-btn>
           </template>
         </v-list-item>
-      </v-list>
+        </v-list>
+        <div aria-hidden="true" :style="{ height: `${fileBottomOffset}px` }" />
+      </div>
     </v-card>
 
     <div
@@ -531,6 +601,21 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.file-viewport {
+  height: calc(100vh - 300px);
+  min-height: 320px;
+  overflow: auto;
+  contain: strict;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.file-list-item {
+  height: 68px;
+  min-height: 68px;
+  contain: layout paint;
+}
+
 .web-context-menu {
   position: fixed;
   z-index: 2400;

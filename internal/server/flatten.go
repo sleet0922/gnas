@@ -99,7 +99,9 @@ func HandleFileFlatten(w http.ResponseWriter, r *http.Request) {
 		name := filepath.Base(sourceFile)
 		destination := uniqueFlattenDestination(rootAbs, name)
 		cleanThumbCache(sourceFile)
+		deleteQdrantVectorsForPath(sourceFile, false)
 		if err := os.Rename(sourceFile, destination); err != nil {
+			clearDeletedEmbeddingPath(sourceFile)
 			failed = append(failed, sourceFile)
 			continue
 		}
