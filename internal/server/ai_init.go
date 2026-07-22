@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,6 +17,21 @@ import (
 
 	"github.com/jeessy2/gnas/internal/db"
 )
+
+func runAICommand(timeout time.Duration, env []string, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	if env != nil {
+		cmd.Env = env
+	}
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return output, fmt.Errorf("command timed out after %s", timeout)
+	}
+	return output, err
+}
 
 //go:embed embed_server.py
 var embedServerCode string
@@ -151,26 +168,37 @@ func checkAndInstallPythonVLM() {
 	log.Println("[AI 初始化] 准备配置 Python 虚拟环境与多模态向量模型...")
 
 	// 1. 安装系统级 python 依赖
-	aptCmd := exec.Command("apt-get", "install", "-y", "python3-venv", "python3-pip", "python3")
-	if output, err := aptCmd.CombinedOutput(); err != nil {
+	aptEnv := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	if output, err := runAICommand(5*time.Minute, aptEnv, "apt-get", "update", "-o", "Acquire::Retries=3"); err != nil {
+		log.Printf("[AI 初始化] apt update 失败: %v, output: %s", err, string(output))
+		return
+	}
+	if output, err := runAICommand(5*time.Minute, aptEnv, "apt-get", "install", "-y", "python3-venv", "python3-pip", "python3"); err != nil {
 		log.Printf("[AI 初始化] apt install 失败: %v, output: %s", err, string(output))
-		// 继续执行，可能系统已存在
+		return
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		log.Printf("[AI 初始化] Python 安装后仍不可用: %v", err)
+		return
 	}
 
 	envDir := aiStoragePath(envDirName)
 	modelDir := aiStoragePath(modelDirName)
 
 	// 2. 创建虚拟环境
-	if _, err := os.Stat(envDir); os.IsNotExist(err) {
+	pythonPath := filepath.Join(envDir, "bin", "python")
+	if _, err := os.Stat(pythonPath); err != nil {
+		if removeErr := os.RemoveAll(envDir); removeErr != nil {
+			log.Printf("[AI 初始化] 清理不完整 Python 虚拟环境失败: %v", removeErr)
+			return
+		}
 		log.Println("[AI 初始化] 正在创建 Python 虚拟环境...")
-		venvCmd := exec.Command("python3", "-m", "venv", envDir)
-		if output, err := venvCmd.CombinedOutput(); err != nil {
+		if output, err := runAICommand(5*time.Minute, aptEnv, "python3", "-m", "venv", envDir); err != nil {
 			log.Printf("[AI 初始化] 创建虚拟环境失败: %v, output: %s", err, string(output))
 			return
 		}
 	}
 
-	pythonPath := filepath.Join(envDir, "bin", "python")
 	pipPath := filepath.Join(envDir, "bin", "pip")
 
 	// 3. 检查服务是否已经在运行
@@ -187,10 +215,10 @@ func checkAndInstallPythonVLM() {
 	tmpDir := aiStoragePath(tempDirName)
 	os.MkdirAll(tmpDir, 0755)
 
-	installCmd := exec.Command(pipPath, "install", "--no-cache-dir", "torch", "torchvision", "transformers", "pillow", "fastapi", "uvicorn", "modelscope", "qwen-vl-utils")
-	installCmd.Env = append(os.Environ(), "TMPDIR="+tmpDir)
-	if output, err := installCmd.CombinedOutput(); err != nil {
-		log.Printf("[AI 初始化] 安装模型依赖警告 (尝试继续): %v, output: %s", err, string(output))
+	pipEnv := append(os.Environ(), "TMPDIR="+tmpDir, "PIP_NO_CACHE_DIR=1")
+	if output, err := runAICommand(30*time.Minute, pipEnv, pipPath, "install", "--no-cache-dir", "torch", "torchvision", "transformers", "pillow", "fastapi", "uvicorn", "modelscope", "qwen-vl-utils"); err != nil {
+		log.Printf("[AI 初始化] 安装模型依赖失败: %v, output: %s", err, string(output))
+		return
 	} else {
 		log.Println("[AI 初始化] 模型依赖包配置完成！")
 	}
@@ -258,17 +286,24 @@ func checkAndInstallQdrant() {
 	if runtime.GOOS == "linux" {
 		log.Println("[AI 初始化] 开始下载并安装 Qdrant (deb)...")
 		// 下载 deb
-		wgetCmd := exec.Command("wget", "https://github.com/qdrant/qdrant/releases/download/v1.18.2/qdrant_1.18.2-1_amd64.deb", "-O", "/tmp/qdrant.deb")
-		if output, err := wgetCmd.CombinedOutput(); err != nil {
+		qdrantDeb := "/tmp/qdrant.deb"
+		os.Remove(qdrantDeb)
+		if output, err := runAICommand(2*time.Minute, nil, "wget", "--inet4-only", "--timeout=30", "--tries=2", "--no-verbose", "https://github.com/qdrant/qdrant/releases/download/v1.18.2/qdrant_1.18.2-1_amd64.deb", "-O", qdrantDeb); err != nil {
 			log.Printf("[AI 初始化] 下载 Qdrant 失败: %v, output: %s", err, string(output))
+			os.Remove(qdrantDeb)
+			return
+		}
+		if info, err := os.Stat(qdrantDeb); err != nil || info.Size() == 0 {
+			log.Printf("[AI 初始化] 下载 Qdrant 完成但安装包为空: %v", err)
+			os.Remove(qdrantDeb)
 			return
 		}
 		// dpkg 安装
-		dpkgCmd := exec.Command("dpkg", "-i", "/tmp/qdrant.deb")
-		if output, err := dpkgCmd.CombinedOutput(); err != nil {
+		if output, err := runAICommand(5*time.Minute, nil, "dpkg", "-i", qdrantDeb); err != nil {
 			log.Printf("[AI 初始化] 安装 Qdrant 失败: %v, output: %s", err, string(output))
 			return
 		}
+		os.Remove(qdrantDeb)
 		log.Println("[AI 初始化] Qdrant 安装成功！")
 
 		// 启动服务 (某些 deb 包可能没有 systemd，直接后台运行二进制文件)
@@ -285,13 +320,19 @@ func checkAndInstallQdrant() {
 		}
 
 		// 等待启动
+		ready := false
 		for i := 0; i < 10; i++ {
 			time.Sleep(2 * time.Second)
 			resp, err := client.Get("http://127.0.0.1:6333/")
 			if err == nil {
 				resp.Body.Close()
+				ready = true
 				break
 			}
+		}
+		if !ready {
+			log.Println("[AI 初始化] Qdrant 安装后未能在 20 秒内启动")
+			return
 		}
 		initQdrantCollection()
 	} else {

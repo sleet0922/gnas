@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jeessy2/gnas/internal/db"
@@ -21,6 +22,37 @@ const (
 	collection = "gnas_photos"
 	// modelName 不再使用 Ollama，将直接调用 Python 脚本
 )
+
+const embeddingQueueSize = 8
+
+var (
+	embeddingSlots   = make(chan struct{}, 1)
+	embeddingQueue   = make(chan string, embeddingQueueSize)
+	embeddingPending sync.Map
+	embeddingOnce    sync.Once
+)
+
+func startEmbeddingWorker() {
+	embeddingOnce.Do(func() {
+		go func() {
+			for path := range embeddingQueue {
+				generateImageEmbedding(path)
+				embeddingPending.Delete(path)
+			}
+		}()
+	})
+}
+
+func enqueueImageEmbedding(path string) {
+	if enabled, err := db.GetSetting("ai_enabled"); err != nil || enabled != "true" {
+		return
+	}
+	if _, loaded := embeddingPending.LoadOrStore(path, struct{}{}); loaded {
+		return
+	}
+	startEmbeddingWorker()
+	embeddingQueue <- path
+}
 
 // initQdrantCollection 初始化 Qdrant 集合
 func initQdrantCollection() {
@@ -43,7 +75,7 @@ func initQdrantCollection() {
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/collections/%s", qdrantURL, collection), bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
@@ -56,6 +88,12 @@ func initQdrantCollection() {
 
 // getEmbeddingFromPython 调用本地 FastAPI 服务生成向量
 func getEmbeddingFromPython(imagePath string, textQuery string) ([]float32, error) {
+	embeddingSlots <- struct{}{}
+	defer func() { <-embeddingSlots }()
+	return getEmbeddingFromPythonUnbounded(imagePath, textQuery)
+}
+
+func getEmbeddingFromPythonUnbounded(imagePath string, textQuery string) ([]float32, error) {
 	payload := map[string]interface{}{}
 	if imagePath != "" {
 		payload["image_path"] = imagePath
@@ -101,7 +139,7 @@ func generateImageEmbedding(absPath string) {
 
 	// 存入 Qdrant
 	id := uuid.NewMD5(uuid.NameSpaceURL, []byte(absPath)).String() // 基于路径生成稳定的 UUID
-	
+
 	payload := map[string]interface{}{
 		"points": []map[string]interface{}{
 			{
@@ -114,11 +152,11 @@ func generateImageEmbedding(absPath string) {
 			},
 		},
 	}
-	
+
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/collections/%s/points?wait=true", qdrantURL, collection), bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -126,7 +164,7 @@ func generateImageEmbedding(absPath string) {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
 		log.Printf("[Qdrant] 存储向量返回错误: %s", string(b))
@@ -153,12 +191,12 @@ func HandleSearchPhotos(w http.ResponseWriter, r *http.Request) {
 
 	// 2. 在 Qdrant 中搜索
 	payload := map[string]interface{}{
-		"vector": vec,
-		"limit":  20,
+		"vector":       vec,
+		"limit":        20,
 		"with_payload": true,
 	}
 	body, _ := json.Marshal(payload)
-	
+
 	resp, err := http.Post(fmt.Sprintf("%s/collections/%s/points/search", qdrantURL, collection), "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		writeError(w, "搜索引擎请求失败")
@@ -193,12 +231,12 @@ func HandleSearchPhotos(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		
+
 		mediaType := "image"
 		if isVideoExt(info.Name()) {
 			mediaType = "video"
 		}
-		
+
 		searchItems = append(searchItems, MediaItem{
 			Name:    info.Name(),
 			Path:    filepath.ToSlash(relPath),

@@ -102,8 +102,6 @@ func checkPassword(hashedPassword, password string) bool {
 	return err == nil
 }
 
-
-
 func ensureDefaultUser() {
 	hasUser, err := db.HasAnyUser()
 	if err != nil || hasUser {
@@ -113,9 +111,7 @@ func ensureDefaultUser() {
 	if err != nil {
 		return
 	}
-	if err := db.CreateUser("root", hashedPwd); err == nil {
-		db.SetSetting("notAllowWanAccess", "true")
-	}
+	db.CreateUser("root", hashedPwd)
 }
 
 // HandleLogin 登录
@@ -244,8 +240,6 @@ func HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, nil)
 }
 
-
-
 // HandleGetLogs 获取日志
 func HandleGetLogs(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, GetLogs())
@@ -256,8 +250,6 @@ func HandleClearLogs(w http.ResponseWriter, r *http.Request) {
 	ClearLogs()
 	writeOK(w, nil)
 }
-
-
 
 // HandleStatus 获取系统状态
 func HandleStatus(w http.ResponseWriter, r *http.Request) {

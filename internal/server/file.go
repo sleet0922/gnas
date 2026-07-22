@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/image/draw"
@@ -27,10 +28,42 @@ import (
 // 文件管理根目录，默认为可执行文件同目录下的 data
 var dataDir string
 
-const thumbnailCacheDirName = "thumbs"
+const (
+	thumbnailCacheDirName = "thumbs"
+	thumbnailConcurrency  = 1
+	maxThumbnailPixels    = uint64(40_000_000)
+)
+
+var thumbnailSlots = make(chan struct{}, thumbnailConcurrency)
+
+type thumbnailCall struct {
+	done chan struct{}
+	path string
+	err  error
+}
+
+var thumbnailCalls sync.Map
+
+func runThumbnail(srcPath string, generate func() (string, error)) (string, error) {
+	call := &thumbnailCall{done: make(chan struct{})}
+	actual, loaded := thumbnailCalls.LoadOrStore(srcPath, call)
+	if loaded {
+		other := actual.(*thumbnailCall)
+		<-other.done
+		return other.path, other.err
+	}
+
+	thumbnailSlots <- struct{}{}
+	call.path, call.err = generate()
+	<-thumbnailSlots
+	close(call.done)
+	thumbnailCalls.Delete(srcPath)
+	return call.path, call.err
+}
 
 var systemExcludes = map[string]bool{
 	".gnas":             true,
+	"gnas":              true,
 	"thumbs":            true,
 	".thumbs":           true,
 	"modelscope_cache":  true,
@@ -81,8 +114,8 @@ func generateThumbForFile(absPath string) {
 			log.Printf("[缩略图] 生成图片缩略图失败 %s: %v", name, err)
 		} else {
 			log.Printf("[缩略图] 已生成图片缩略图: %s", name)
-			// 生成图片缩略图后，也生成特征向量存入 Qdrant
-			go generateImageEmbedding(absPath)
+			// 将向量任务放入有界队列，避免扫描时创建大量 goroutine。
+			enqueueImageEmbedding(absPath)
 		}
 	} else if isVideoExt(name) {
 		if _, err := generateVideoThumbnail(absPath); err != nil {
@@ -104,7 +137,7 @@ func GenerateAllThumbnails() {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if strings.HasPrefix(name, ".") || systemExcludes[name] {
+			if path != dataDir && (strings.HasPrefix(name, ".") || systemExcludes[name]) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -351,6 +384,8 @@ func mimeTypeByExt(name string) string {
 		return "image/svg+xml"
 	case ".bmp":
 		return "image/bmp"
+	case ".heic", ".heif":
+		return "image/heif"
 	case ".ico":
 		return "image/x-icon"
 	case ".mp4":
@@ -396,7 +431,7 @@ func mimeTypeByExt(name string) string {
 func isImageExt(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
 	switch ext {
-	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp":
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif":
 		return true
 	}
 	return false
@@ -430,7 +465,7 @@ func HandleGalleryList(w http.ResponseWriter, r *http.Request) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if strings.HasPrefix(name, ".") || systemExcludes[name] {
+			if path != dataDir && (strings.HasPrefix(name, ".") || systemExcludes[name]) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -482,6 +517,11 @@ func getThumbCachePath(absPath string) string {
 	name := filepath.Base(absPath)
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
+	// HEIF/HEIC thumbnails are emitted as JPEG because Go and many clients do
+	// not decode those formats consistently.
+	if strings.EqualFold(ext, ".heic") || strings.EqualFold(ext, ".heif") {
+		ext = ".jpg"
+	}
 	return filepath.Join(thumbDir, "sl_"+base+ext)
 }
 
@@ -496,6 +536,12 @@ func getVideoThumbCachePath(absPath string) string {
 
 // generateVideoThumbnail 使用 ffmpeg 从视频中截取第一帧作为缩略图
 func generateVideoThumbnail(srcPath string) (string, error) {
+	return runThumbnail(srcPath, func() (string, error) {
+		return generateVideoThumbnailUnbounded(srcPath)
+	})
+}
+
+func generateVideoThumbnailUnbounded(srcPath string) (string, error) {
 	thumbPath := getVideoThumbCachePath(srcPath)
 	thumbDir := filepath.Dir(thumbPath)
 	os.MkdirAll(thumbDir, 0755)
@@ -527,6 +573,12 @@ func generateVideoThumbnail(srcPath string) (string, error) {
 
 // generateThumbnail 生成缩略图，最大宽度 300px，返回缓存文件路径
 func generateThumbnail(srcPath string) (string, error) {
+	return runThumbnail(srcPath, func() (string, error) {
+		return generateThumbnailUnbounded(srcPath)
+	})
+}
+
+func generateThumbnailUnbounded(srcPath string) (string, error) {
 	thumbPath := getThumbCachePath(srcPath)
 	thumbDir := filepath.Dir(thumbPath)
 	os.MkdirAll(thumbDir, 0755)
@@ -546,9 +598,21 @@ func generateThumbnail(srcPath string) (string, error) {
 	}
 	defer f.Close()
 
+	config, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return generateFFmpegImageThumbnail(srcPath, thumbPath, fmt.Errorf("Go image decoder: %w", err))
+	}
+	if config.Width <= 0 || config.Height <= 0 || uint64(config.Width)*uint64(config.Height) > maxThumbnailPixels {
+		reason := fmt.Errorf("image is %dx%d (%d pixels)", config.Width, config.Height, uint64(config.Width)*uint64(config.Height))
+		return generateFFmpegImageThumbnail(srcPath, thumbPath, reason)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+
 	img, _, err := image.Decode(f)
 	if err != nil {
-		return "", err
+		return generateFFmpegImageThumbnail(srcPath, thumbPath, fmt.Errorf("Go image decoder: %w", err))
 	}
 
 	bounds := img.Bounds()
@@ -590,6 +654,57 @@ func generateThumbnail(srcPath string) (string, error) {
 		err = jpeg.Encode(out, dst, &jpeg.Options{Quality: 80})
 	}
 	if err != nil {
+		return "", err
+	}
+	return thumbPath, nil
+}
+
+// generateFFmpegImageThumbnail handles formats unsupported by Go's image
+// package and very large sources without materializing the full image in Go.
+// The caller already holds the global thumbnail slot, so only one FFmpeg
+// process can run at a time.
+func generateFFmpegImageThumbnail(srcPath, thumbPath string, reason error) (string, error) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return "", fmt.Errorf("thumbnail fallback required (%v), but ffmpeg is unavailable: %w", reason, err)
+	}
+
+	thumbDir := filepath.Dir(thumbPath)
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(thumbDir, ".gnas-thumb-*.tmp"+filepath.Ext(thumbPath))
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", err
+	}
+	defer os.Remove(tmpPath)
+
+	// Keep FFmpeg's worker/filter threads bounded. The scale filter reduces
+	// the frame before it is written, and the temporary output is committed
+	// only after FFmpeg exits successfully.
+	cmd := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
+		"-i", srcPath,
+		"-frames:v", "1",
+		"-vf", "scale=300:-1:flags=fast_bilinear",
+		"-q:v", "5",
+		"-y", tmpPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("ffmpeg thumbnail fallback failed (%v; source: %v), output: %s", err, reason, strings.TrimSpace(string(output)))
+	}
+	if info, err := os.Stat(tmpPath); err != nil || info.Size() == 0 {
+		if err == nil {
+			err = fmt.Errorf("empty output")
+		}
+		return "", fmt.Errorf("ffmpeg thumbnail fallback produced no output (source: %v): %w", reason, err)
+	}
+	if err := os.Rename(tmpPath, thumbPath); err != nil {
 		return "", err
 	}
 	return thumbPath, nil

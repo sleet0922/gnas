@@ -4,13 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/jeessy2/gnas/internal/db"
 )
 
 type contextKey string
@@ -99,28 +97,8 @@ func WithAccessControl(next http.HandlerFunc) http.HandlerFunc {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if isWanBlocked(r) {
-			writeErrorStatus(w, http.StatusForbidden, "已禁止公网访问")
-			return
-		}
 		next(w, r)
 	}
-}
-
-func isWanBlocked(r *http.Request) bool {
-	setting, err := db.GetSetting("notAllowWanAccess")
-	if err != nil || setting != "true" {
-		return false
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
 }
 
 func publicTokenForLog(token string) string {

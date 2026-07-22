@@ -2,7 +2,6 @@ package main
 
 import (
 	"embed"
-	"flag"
 	"fmt"
 	"io/fs"
 	"log"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/jeessy2/gnas/internal/db"
@@ -20,18 +20,21 @@ import (
 //go:embed all:web/dist
 var webDist embed.FS
 
-var (
-	listenAddr = flag.String("l", ":8080", "监听地址")
-	dataPath   = flag.String("data", "/var/lib/gnas", "数据和数据库存储路径")
+const (
+	listenAddr  = ":8082"
+	dataPath    = "/var/lib/gnas"
+	certFile    = "/ssl/1.pem"
+	keyFile     = "/ssl/1.key"
+	memoryLimit = int64(768 << 20)
 )
 
 var version = "DEV"
 
 func main() {
-	flag.Parse()
+	debug.SetMemoryLimit(memoryLimit)
 
 	// 初始化数据目录
-	dataDir := filepath.Clean(*dataPath)
+	dataDir := filepath.Clean(dataPath)
 	os.MkdirAll(dataDir, 0755)
 	server.InitDataDir(dataDir)
 
@@ -122,15 +125,15 @@ func startHTTPServer() error {
 	}
 
 	// 解析监听地址
-	l, err := net.Listen("tcp", *listenAddr)
+	l, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听端口异常: %w", err)
 	}
 
-	log.Printf("NAS 服务启动，监听 %s", *listenAddr)
+	log.Printf("NAS HTTPS 服务启动，监听 %s", listenAddr)
 	go func() {
-		if err := http.Serve(l, mux); err != nil {
-			log.Fatalf("HTTP 服务异常: %v", err)
+		if err := http.ServeTLS(l, mux, certFile, keyFile); err != nil {
+			log.Fatalf("HTTPS 服务异常: %v", err)
 		}
 	}()
 
