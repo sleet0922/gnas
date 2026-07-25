@@ -1,0 +1,17 @@
+[Unit]
+Description=GNAS Private NAS Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gnas
+WorkingDirectory=/var/lib/gnas
+User=root
+Group=root
+Restart=always
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

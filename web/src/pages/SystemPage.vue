@@ -65,10 +65,24 @@ function serviceStatusColor(status: string): string {
 
 const aiEnabled = ref(false)
 const updatingSettings = ref(false)
+const sslEnabled = ref(false)
+const sslCertFile = ref('/ssl/1.pem')
+const sslKeyFile = ref('/ssl/1.key')
+const updatingSSL = ref(false)
 
 async function loadSettings() {
-  const data = await apiGet<{ ai_enabled: boolean }>('/api/settings')
-  if (data) aiEnabled.value = data.ai_enabled
+  const data = await apiGet<{
+    ai_enabled: boolean
+    ssl_enabled: boolean
+    ssl_cert_file: string
+    ssl_key_file: string
+  }>('/api/settings')
+  if (data) {
+    aiEnabled.value = data.ai_enabled
+    sslEnabled.value = data.ssl_enabled
+    sslCertFile.value = data.ssl_cert_file
+    sslKeyFile.value = data.ssl_key_file
+  }
 }
 
 async function toggleAISettings() {
@@ -81,6 +95,39 @@ async function toggleAISettings() {
     aiEnabled.value = !aiEnabled.value
   } finally {
     updatingSettings.value = false
+  }
+}
+
+async function saveSSLSettings() {
+  updatingSSL.value = true
+  try {
+    const data = await apiPost<{
+      restart_required: boolean
+      restart_scheduled: boolean
+    }>('/api/settings/update', {
+      ssl_enabled: sslEnabled.value,
+      ssl_cert_file: sslCertFile.value,
+      ssl_key_file: sslKeyFile.value,
+    })
+    if (data?.restart_required) {
+      const protocol = sslEnabled.value ? 'https:' : 'http:'
+      if (data.restart_scheduled) {
+        alert('SSL 设置已保存，服务正在重启，即将切换访问协议。')
+        window.setTimeout(() => {
+          const target = new URL(window.location.href)
+          target.protocol = protocol
+          window.location.assign(target.toString())
+        }, 1800)
+      } else {
+        alert('SSL 设置已保存，请重启 gnas 服务后使用新的访问协议。')
+      }
+    } else {
+      alert('SSL 设置已保存')
+    }
+  } catch (e: any) {
+    alert(e.message || '更新 SSL 设置失败')
+  } finally {
+    updatingSSL.value = false
   }
 }
 
@@ -155,6 +202,60 @@ onUnmounted(() => clearInterval(timer))
           inset
           @change="toggleAISettings"
         />
+      </div>
+    </v-card>
+
+    <!-- SSL 设置 -->
+    <v-card color="surface-variant" class="pa-5 mb-4">
+      <div class="d-flex align-center justify-space-between flex-wrap ga-3 mb-3">
+        <div class="d-flex align-center ga-3">
+          <v-icon color="primary">mdi-lock-outline</v-icon>
+          <span class="text-subtitle-1 font-weight-bold">HTTPS / SSL</span>
+        </div>
+        <v-switch
+          v-model="sslEnabled"
+          :disabled="updatingSSL"
+          color="primary"
+          hide-details
+          inset
+        />
+      </div>
+      <div class="text-caption text-medium-emphasis mb-4">
+        默认使用 HTTP。开启后服务会自动重启并在 8082 端口使用 HTTPS。
+      </div>
+      <v-row>
+        <v-col cols="12" md="6">
+          <v-text-field
+            v-model="sslCertFile"
+            label="证书文件路径"
+            placeholder="/ssl/1.pem"
+            prepend-inner-icon="mdi-certificate-outline"
+            :disabled="updatingSSL"
+            hide-details="auto"
+          />
+        </v-col>
+        <v-col cols="12" md="6">
+          <v-text-field
+            v-model="sslKeyFile"
+            label="私钥文件路径"
+            placeholder="/ssl/1.key"
+            prepend-inner-icon="mdi-key-outline"
+            :disabled="updatingSSL"
+            hide-details="auto"
+          />
+        </v-col>
+      </v-row>
+      <div class="d-flex justify-end mt-3">
+        <v-btn
+          color="primary"
+          variant="tonal"
+          :loading="updatingSSL"
+          :disabled="updatingSSL"
+          prepend-icon="mdi-content-save-outline"
+          @click="saveSSLSettings"
+        >
+          保存 SSL 设置
+        </v-btn>
       </div>
     </v-card>
 

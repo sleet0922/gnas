@@ -46,6 +46,7 @@ const (
 	modelDirName       = "qwen3_vl_ov"
 	tempDirName        = "tmp"
 	logFileName        = "embed_server.log"
+	pythonPackageIndex = "https://pypi.tuna.tsinghua.edu.cn/simple"
 )
 
 func migrateAIStorageDirs() {
@@ -214,12 +215,12 @@ func checkAndInstallPythonVLM() {
 	}
 
 	// 4. 安装必要的 Python 依赖包
-	log.Println("[AI 初始化] 正在检测并安装多模态大模型所需依赖包（首次安装需要几分钟）...")
+	log.Printf("[AI 初始化] 正在检测并安装多模态大模型所需依赖包（首次安装需要几分钟），pip 源: %s", pythonPackageIndex)
 	tmpDir := aiStoragePath(tempDirName)
 	os.MkdirAll(tmpDir, 0755)
 
-	pipEnv := append(os.Environ(), "TMPDIR="+tmpDir, "PIP_NO_CACHE_DIR=1")
-	if output, err := runAICommand(30*time.Minute, pipEnv, pipPath, "install", "--no-cache-dir", "torch", "torchvision", "transformers", "pillow", "fastapi", "uvicorn", "modelscope", "qwen-vl-utils"); err != nil {
+	pipEnv := append(os.Environ(), "TMPDIR="+tmpDir, "PIP_NO_CACHE_DIR=1", "PIP_INDEX_URL="+pythonPackageIndex)
+	if output, err := runAICommand(30*time.Minute, pipEnv, pipPath, "install", "--no-cache-dir", "--index-url", pythonPackageIndex, "torch", "torchvision", "transformers", "pillow", "fastapi", "uvicorn", "modelscope", "qwen-vl-utils"); err != nil {
 		log.Printf("[AI 初始化] 安装模型依赖失败: %v, output: %s", err, string(output))
 		return
 	} else {

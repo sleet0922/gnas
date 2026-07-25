@@ -13,7 +13,7 @@ class ApiService {
   static const String _usernameKey = 'saved_username';
   static const String _passwordKey = 'saved_password';
   static const String _tokenKey = 'auth_token';
-  static String _baseUrl = 'http://192.168.1.100:8080';
+  static String _baseUrl = 'http://192.168.1.100:8082';
   static String _token = '';
   static const Duration _timeout = Duration(seconds: 20);
   static const Duration _duplicateTimeout = Duration(minutes: 10);
@@ -68,7 +68,7 @@ class ApiService {
   Future<void> loadSaved() async {
     final prefs = await SharedPreferences.getInstance();
     _baseUrl = normalizeUrl(
-      prefs.getString(_hostKey) ?? 'http://192.168.1.100:8080',
+      prefs.getString(_hostKey) ?? 'http://192.168.1.100:8082',
     );
     _token = prefs.getString(_tokenKey) ?? '';
   }
@@ -85,7 +85,7 @@ class ApiService {
     return {
       'username': prefs.getString(_usernameKey) ?? '',
       'password': prefs.getString(_passwordKey) ?? '',
-      'host': prefs.getString(_hostKey) ?? 'http://192.168.1.100:8080',
+      'host': prefs.getString(_hostKey) ?? 'http://192.168.1.100:8082',
     };
   }
 
@@ -394,14 +394,24 @@ class ApiService {
     );
   }
 
-  Future<ApiResponse<void>> updateSettings(bool aiEnabled) async {
-    return _request<void>(
+  Future<ApiResponse<Map<String, dynamic>>> updateSettings({
+    bool? aiEnabled,
+    bool? sslEnabled,
+    String? sslCertFile,
+    String? sslKeyFile,
+  }) async {
+    final body = <String, dynamic>{};
+    if (aiEnabled != null) body['ai_enabled'] = aiEnabled;
+    if (sslEnabled != null) body['ssl_enabled'] = sslEnabled;
+    if (sslCertFile != null) body['ssl_cert_file'] = sslCertFile;
+    if (sslKeyFile != null) body['ssl_key_file'] = sslKeyFile;
+    return _request<Map<String, dynamic>>(
       () => http.post(
         Uri.parse('$_baseUrl/api/settings/update'),
         headers: _jsonHeaders,
-        body: jsonEncode({'ai_enabled': aiEnabled}),
+        body: jsonEncode(body),
       ),
-      (_) {},
+      (d) => d as Map<String, dynamic>,
     );
   }
 

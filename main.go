@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/tls"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -22,8 +24,6 @@ var webDist embed.FS
 const (
 	listenAddr = ":8082"
 	dataPath   = "/var/lib/gnas"
-	certFile   = "/ssl/1.pem"
-	keyFile    = "/ssl/1.key"
 )
 
 var version = "DEV"
@@ -34,7 +34,6 @@ func main() {
 	os.MkdirAll(dataDir, 0755)
 	server.InitDataDir(dataDir)
 	server.CleanupGalleryExportTemps()
-	server.EnsureSystemdService()
 
 	// 检查并安装 ffmpeg
 	server.CheckAndInstallFFmpeg()
@@ -122,16 +121,47 @@ func startHTTPServer() error {
 		})
 	}
 
+	tlsSettings, err := server.GetTLSSettings()
+	if err != nil {
+		return fmt.Errorf("读取 TLS 配置失败: %w", err)
+	}
+	if err := server.ValidateTLSSettings(tlsSettings); err != nil {
+		return err
+	}
+
+	var tlsConfig *tls.Config
+	if tlsSettings.Enabled {
+		certificate, err := tls.LoadX509KeyPair(tlsSettings.CertFile, tlsSettings.KeyFile)
+		if err != nil {
+			return fmt.Errorf("加载 TLS 证书失败: %w", err)
+		}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{certificate},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+
 	// 解析监听地址
 	l, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听端口异常: %w", err)
 	}
 
-	log.Printf("NAS HTTPS 服务启动，监听 %s", listenAddr)
+	httpServer := &http.Server{Handler: mux, TLSConfig: tlsConfig}
+	if tlsSettings.Enabled {
+		log.Printf("NAS HTTPS 服务启动，监听 %s", listenAddr)
+	} else {
+		log.Printf("NAS HTTP 服务启动，监听 %s", listenAddr)
+	}
 	go func() {
-		if err := http.ServeTLS(l, mux, certFile, keyFile); err != nil {
-			log.Fatalf("HTTPS 服务异常: %v", err)
+		var serveErr error
+		if tlsSettings.Enabled {
+			serveErr = httpServer.ServeTLS(l, "", "")
+		} else {
+			serveErr = httpServer.Serve(l)
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			log.Fatalf("HTTP 服务异常: %v", serveErr)
 		}
 	}()
 

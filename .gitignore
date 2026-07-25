@@ -17,6 +17,7 @@ data/
 !config.example.yaml
 !**/pubspec.yaml
 !**/analysis_options.yaml
+!nfpm.yaml
 *.db
 
 # Web

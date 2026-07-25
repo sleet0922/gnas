@@ -110,7 +110,7 @@ class _LoginPageState extends State<LoginPage> {
                     controller: _hostController,
                     decoration: InputDecoration(
                       labelText: '服务器地址',
-                      hintText: 'http://192.168.1.100:8080 或 [::1]:8080',
+                      hintText: 'http://192.168.1.100:8082 或 [::1]:8082',
                       prefixIcon: const Icon(Icons.link),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),

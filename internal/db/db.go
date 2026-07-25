@@ -113,6 +113,21 @@ func SetSetting(key, value string) error {
 	return err
 }
 
+// SetSettings updates several settings atomically.
+func SetSettings(settings map[string]string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	for key, value := range settings {
+		if _, err := tx.Exec("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", key, value); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // --- 用户 ---
 
 // User 用户模型

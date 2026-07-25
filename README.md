@@ -58,7 +58,7 @@ GNAS 是一个轻量级、安全且易于部署的个人私有 NAS（网络附�
 
 ```text
 gnas/
-├── main.go               # 后端服务入口及命令行参数解析
+├── main.go               # 后端服务入口
 ├── Makefile              # 快速运行、打包与部署指令
 ├── go.mod                # Go 依赖配置
 ├── go.sum                # Go 依赖版本校验
@@ -98,8 +98,8 @@ npm run build
 # 自动整理 Go 依赖
 go mod tidy
 
-# 本地直接运行（默认监听 :8080，数据存放在 ./data 目录）
-go run main.go -l :8080 -data ./data
+# 本地直接运行（固定监听 :8082，数据存放在 /var/lib/gnas）
+go run main.go
 ```
 
 ### 3. 跨平台打包 (例如 Linux x64)
@@ -115,15 +115,23 @@ cd gnas_app
 flutter pub get
 flutter run
 ```
-在 App 登录界面输入 GNAS 服务端的地址（如 `http://192.168.1.100:8080`）及账户信息（默认账号：`root`，密码：`root`）即可建立连接。
+在 App 登录界面输入 GNAS 服务端的地址（如 `http://192.168.1.100:8082`）及账户信息（默认账号：`root`，密码：`root`）即可建立连接。
 
 ---
 
-## 命令行参数说明
+## Debian 安装包
 
-GNAS 后端支持以下命令行参数：
-- `-l` : 绑定监听的地址与端口（默认 `":8080"`）。
-- `-data` : 数据和 SQLite 数据库的存储路径（默认 `"/var/lib/gnas"`）。
+安装 `nfpm` 后，在项目根目录执行：
+```bash
+make build-deb
+dpkg -i release/gnas_1.0.0_amd64.deb
+```
+
+安装包会把无参数启动的二进制放到 `/usr/local/bin/gnas`，注册并启用 `gnas.service`，服务固定监听 `8082`，数据存放在 `/var/lib/gnas`，默认以 root 用户运行。
+
+## HTTPS / SSL
+
+服务默认使用 HTTP。登录 Web 端“系统”页面或手机端“设置”页面，打开 HTTPS 并填写证书和私钥的绝对路径后保存，服务会自动执行 `systemctl restart gnas.service`；客户端会切换到相应的 `http://` 或 `https://` 地址。
 
 ## 相册 ZIP 备份
 

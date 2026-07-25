@@ -1,0 +1,28 @@
+name: gnas
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: GNAS maintainers
+description: Go Private NAS service with a web management interface.
+homepage: https://github.com/jeessy2/gnas
+
+contents:
+  - src: release/gnas-linux-amd64
+    dst: /usr/local/bin/gnas
+    file_info:
+      mode: 0755
+  - src: deploy/gnas.service
+    dst: /lib/systemd/system/gnas.service
+    file_info:
+      mode: 0644
+  - dst: /var/lib/gnas
+    type: dir
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: deploy/postinstall.sh
+  preremove: deploy/preremove.sh
+  postremove: deploy/postremove.sh

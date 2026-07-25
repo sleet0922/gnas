@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,6 +16,75 @@ import (
 
 	"github.com/jeessy2/gnas/internal/db"
 )
+
+const (
+	defaultSSLCertFile = "/ssl/1.pem"
+	defaultSSLKeyFile  = "/ssl/1.key"
+	settingSSLEnabled  = "ssl_enabled"
+	settingSSLCertFile = "ssl_cert_file"
+	settingSSLKeyFile  = "ssl_key_file"
+)
+
+// TLSSettings controls the protocol used by the main HTTP listener.
+type TLSSettings struct {
+	Enabled  bool
+	CertFile string
+	KeyFile  string
+}
+
+// GetTLSSettings returns persisted TLS settings with stable defaults.
+func GetTLSSettings() (TLSSettings, error) {
+	enabled, err := db.GetSetting(settingSSLEnabled)
+	if err != nil {
+		return TLSSettings{}, err
+	}
+	certFile, err := db.GetSetting(settingSSLCertFile)
+	if err != nil {
+		return TLSSettings{}, err
+	}
+	keyFile, err := db.GetSetting(settingSSLKeyFile)
+	if err != nil {
+		return TLSSettings{}, err
+	}
+	if strings.TrimSpace(certFile) == "" {
+		certFile = defaultSSLCertFile
+	}
+	if strings.TrimSpace(keyFile) == "" {
+		keyFile = defaultSSLKeyFile
+	}
+	return TLSSettings{Enabled: enabled == "true", CertFile: certFile, KeyFile: keyFile}, nil
+}
+
+// ValidateTLSSettings verifies that an enabled TLS configuration can be loaded.
+func ValidateTLSSettings(settings TLSSettings) error {
+	if !settings.Enabled {
+		return nil
+	}
+	if !filepath.IsAbs(settings.CertFile) || !filepath.IsAbs(settings.KeyFile) {
+		return fmt.Errorf("证书和私钥路径必须是绝对路径")
+	}
+	if _, err := tls.LoadX509KeyPair(settings.CertFile, settings.KeyFile); err != nil {
+		return fmt.Errorf("加载证书或私钥失败: %w", err)
+	}
+	return nil
+}
+
+func scheduleServiceRestart() bool {
+	if runtime.GOOS != "linux" || os.Getenv("INVOCATION_ID") == "" {
+		return false
+	}
+	systemctl, err := exec.LookPath("systemctl")
+	if err != nil {
+		return false
+	}
+	go func() {
+		time.Sleep(750 * time.Millisecond)
+		if err := exec.Command(systemctl, "--no-block", "restart", "gnas.service").Start(); err != nil {
+			log.Printf("[systemd] 请求重启 gnas.service 失败: %v", err)
+		}
+	}()
+	return true
+}
 
 // SystemInfo 系统信息
 type SystemInfo struct {
@@ -321,6 +391,11 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "获取配置失败")
 		return
 	}
+	tlsSettings, err := GetTLSSettings()
+	if err != nil {
+		writeError(w, "获取配置失败")
+		return
+	}
 
 	enabled := false
 	if aiEnabled == "true" {
@@ -328,36 +403,83 @@ func HandleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeOK(w, map[string]interface{}{
-		"ai_enabled": enabled,
+		"ai_enabled":    enabled,
+		"ssl_enabled":   tlsSettings.Enabled,
+		"ssl_cert_file": tlsSettings.CertFile,
+		"ssl_key_file":  tlsSettings.KeyFile,
 	})
 }
 
 // HandleUpdateSettings 更新系统设置
 func HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		AIEnabled bool `json:"ai_enabled"`
+		AIEnabled  *bool   `json:"ai_enabled"`
+		SSLEnabled *bool   `json:"ssl_enabled"`
+		SSLCert    *string `json:"ssl_cert_file"`
+		SSLKey     *string `json:"ssl_key_file"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeError(w, "解析请求参数失败")
 		return
 	}
 
-	val := "false"
-	if payload.AIEnabled {
-		val = "true"
+	currentTLS, err := GetTLSSettings()
+	if err != nil {
+		writeError(w, "获取配置失败")
+		return
+	}
+	nextTLS := currentTLS
+	if payload.SSLEnabled != nil {
+		nextTLS.Enabled = *payload.SSLEnabled
+	}
+	if payload.SSLCert != nil {
+		nextTLS.CertFile = strings.TrimSpace(*payload.SSLCert)
+		if nextTLS.CertFile == "" {
+			nextTLS.CertFile = defaultSSLCertFile
+		}
+	}
+	if payload.SSLKey != nil {
+		nextTLS.KeyFile = strings.TrimSpace(*payload.SSLKey)
+		if nextTLS.KeyFile == "" {
+			nextTLS.KeyFile = defaultSSLKeyFile
+		}
+	}
+	if err := ValidateTLSSettings(nextTLS); err != nil {
+		writeError(w, err.Error())
+		return
 	}
 
-	// 保存设置
-	if err := db.SetSetting("ai_enabled", val); err != nil {
+	settings := make(map[string]string)
+	if payload.AIEnabled != nil {
+		val := "false"
+		if *payload.AIEnabled {
+			val = "true"
+		}
+		settings["ai_enabled"] = val
+	}
+	if payload.SSLEnabled != nil || payload.SSLCert != nil || payload.SSLKey != nil {
+		sslValue := "false"
+		if nextTLS.Enabled {
+			sslValue = "true"
+		}
+		settings[settingSSLEnabled] = sslValue
+		settings[settingSSLCertFile] = nextTLS.CertFile
+		settings[settingSSLKeyFile] = nextTLS.KeyFile
+	}
+	if len(settings) == 0 {
+		writeError(w, "没有需要更新的配置")
+		return
+	}
+	if err := db.SetSettings(settings); err != nil {
 		writeError(w, "保存配置失败")
 		return
 	}
 
 	// 动态启动/关闭 AI 后台服务
-	if payload.AIEnabled {
+	if payload.AIEnabled != nil && *payload.AIEnabled {
 		log.Println("[设置] AI 功能被启用，触发依赖检测与服务启动...")
 		CheckAndInstallAI()
-	} else {
+	} else if payload.AIEnabled != nil {
 		log.Println("[设置] AI 功能被禁用，正在停止后台模型服务以释放内存...")
 		go func() {
 			// 关闭 Python 向量服务器
@@ -367,5 +489,16 @@ func HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	writeOK(w, nil)
+	tlsChanged := nextTLS != currentTLS && (payload.SSLEnabled != nil || payload.SSLCert != nil || payload.SSLKey != nil)
+	restartScheduled := false
+	if tlsChanged {
+		restartScheduled = scheduleServiceRestart()
+	}
+	writeOK(w, map[string]interface{}{
+		"restart_required":  tlsChanged,
+		"restart_scheduled": restartScheduled,
+		"ssl_enabled":       nextTLS.Enabled,
+		"ssl_cert_file":     nextTLS.CertFile,
+		"ssl_key_file":      nextTLS.KeyFile,
+	})
 }

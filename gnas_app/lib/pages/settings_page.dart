@@ -16,6 +16,10 @@ class _SettingsPageState extends State<SettingsPage>
   final _api = ApiService();
   bool _aiEnabled = false;
   bool _loadingSetting = true;
+  bool _sslEnabled = false;
+  bool _savingSSL = false;
+  final _sslCertController = TextEditingController(text: '/ssl/1.pem');
+  final _sslKeyController = TextEditingController(text: '/ssl/1.key');
 
   @override
   bool get wantKeepAlive => true;
@@ -32,6 +36,11 @@ class _SettingsPageState extends State<SettingsPage>
     if (res.isSuccess) {
       setState(() {
         _aiEnabled = res.data?['ai_enabled'] == true;
+        _sslEnabled = res.data?['ssl_enabled'] == true;
+        _sslCertController.text =
+            res.data?['ssl_cert_file'] as String? ?? '/ssl/1.pem';
+        _sslKeyController.text =
+            res.data?['ssl_key_file'] as String? ?? '/ssl/1.key';
         _loadingSetting = false;
       });
     } else {
@@ -41,7 +50,7 @@ class _SettingsPageState extends State<SettingsPage>
 
   Future<void> _toggleAI(bool val) async {
     setState(() => _loadingSetting = true);
-    final res = await _api.updateSettings(val);
+    final res = await _api.updateSettings(aiEnabled: val);
     if (!mounted) return;
     if (res.isSuccess) {
       setState(() {
@@ -55,6 +64,49 @@ class _SettingsPageState extends State<SettingsPage>
       setState(() => _loadingSetting = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(res.message ?? '更新设置失败')),
+      );
+    }
+  }
+
+  Future<void> _saveSSL() async {
+    setState(() => _savingSSL = true);
+    final res = await _api.updateSettings(
+      sslEnabled: _sslEnabled,
+      sslCertFile: _sslCertController.text.trim(),
+      sslKeyFile: _sslKeyController.text.trim(),
+    );
+    if (!mounted) return;
+    setState(() => _savingSSL = false);
+    if (!res.isSuccess) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(res.message ?? '更新 SSL 设置失败')),
+      );
+      return;
+    }
+
+    final restartScheduled = res.data?['restart_scheduled'] == true;
+    final restartRequired = res.data?['restart_required'] == true;
+    if (restartRequired) {
+      final current = Uri.tryParse(_api.baseUrl);
+      if (current != null) {
+        await _api.saveHost(
+          current.replace(scheme: _sslEnabled ? 'https' : 'http').toString(),
+        );
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            restartScheduled
+                ? 'SSL 设置已保存，服务正在重启，后续请求将使用新的协议'
+                : 'SSL 设置已保存，请重启 gnas 服务后使用新的协议',
+          ),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('SSL 设置已保存')),
       );
     }
   }
@@ -89,6 +141,13 @@ class _SettingsPageState extends State<SettingsPage>
       MaterialPageRoute(builder: (_) => const LoginPage()),
       (route) => false,
     );
+  }
+
+  @override
+  void dispose() {
+    _sslCertController.dispose();
+    _sslKeyController.dispose();
+    super.dispose();
   }
 
   @override
@@ -212,6 +271,83 @@ class _SettingsPageState extends State<SettingsPage>
             subtitle: const Text('自动开启向量数据库与大模型以支持语义搜索及相似照片查重'),
             value: _aiEnabled,
             onChanged: _loadingSetting ? null : _toggleAI,
+          ),
+        ),
+        const SizedBox(height: 24),
+        // SSL Section
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Text(
+            'HTTPS / SSL',
+            style: theme.textTheme.titleSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Card(
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Column(
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primaryContainer,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(
+                      Icons.lock_outline,
+                      size: 18,
+                      color: theme.colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                  title: const Text('启用 HTTPS'),
+                  subtitle: const Text('保存后服务会自动重启并继续使用 8082 端口'),
+                  value: _sslEnabled,
+                  onChanged: _savingSSL
+                      ? null
+                      : (value) => setState(() => _sslEnabled = value),
+                ),
+                TextField(
+                  controller: _sslCertController,
+                  enabled: !_savingSSL,
+                  decoration: const InputDecoration(
+                    labelText: '证书文件路径',
+                    hintText: '/ssl/1.pem',
+                    prefixIcon: Icon(Icons.card_membership_outlined),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _sslKeyController,
+                  enabled: !_savingSSL,
+                  decoration: const InputDecoration(
+                    labelText: '私钥文件路径',
+                    hintText: '/ssl/1.key',
+                    prefixIcon: Icon(Icons.key_outlined),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.tonalIcon(
+                    onPressed: _savingSSL ? null : _saveSSL,
+                    icon: _savingSSL
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_outlined),
+                    label: const Text('保存 SSL 设置'),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 24),
