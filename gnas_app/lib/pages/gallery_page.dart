@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import '../services/api_service.dart';
 import '../models/media_item.dart';
+import 'recycle_page.dart';
 
 class GalleryPage extends StatefulWidget {
   const GalleryPage({super.key});
@@ -23,6 +24,9 @@ class _GalleryPageState extends State<GalleryPage>
 
   bool _aiEnabled = false;
   final TextEditingController _searchController = TextEditingController();
+
+  bool _isSelectionMode = false;
+  final Set<String> _selectedPaths = {};
 
   @override
   bool get wantKeepAlive => true;
@@ -251,9 +255,22 @@ class _GalleryPageState extends State<GalleryPage>
               itemCount: _items.length,
               itemBuilder: (_, i) {
                 final item = _items[i];
+                final isSelected = _selectedPaths.contains(item.path);
                 return GestureDetector(
-                  onTap: () => _preview(context, item),
-                  onLongPress: () => _deleteItem(item),
+                  onTap: () {
+                    if (_isSelectionMode) {
+                      _toggleSelection(item);
+                    } else {
+                      _preview(context, item);
+                    }
+                  },
+                  onLongPress: () {
+                    if (_isSelectionMode) {
+                      _toggleSelection(item);
+                    } else {
+                      _enterSelectionMode(item);
+                    }
+                  },
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
@@ -281,6 +298,32 @@ class _GalleryPageState extends State<GalleryPage>
                             ),
                           ),
                         ),
+                      if (_isSelectionMode)
+                        Positioned(
+                          top: 6,
+                          right: 6,
+                          child: Container(
+                            width: 24,
+                            height: 24,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: isSelected
+                                  ? theme.colorScheme.primary
+                                  : Colors.transparent,
+                              border: Border.all(
+                                color: Colors.white,
+                                width: 2,
+                              ),
+                            ),
+                            child: isSelected
+                                ? const Icon(
+                                    Icons.check,
+                                    color: Colors.white,
+                                    size: 16,
+                                  )
+                                : null,
+                          ),
+                        ),
                     ],
                   ),
                 );
@@ -293,26 +336,62 @@ class _GalleryPageState extends State<GalleryPage>
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('相册'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.file_upload_outlined),
-            tooltip: '导入相册 ZIP',
-            onPressed: _importGallery,
-          ),
-          IconButton(
-            icon: const Icon(Icons.file_download_outlined),
-            tooltip: '导出相册 ZIP',
-            onPressed: _exportGallery,
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              _searchController.clear();
-              _loadGallery();
-            },
-          ),
-        ],
+        title: Text(
+          _isSelectionMode ? '已选 ${_selectedPaths.length} 项' : '相册',
+        ),
+        leading: _isSelectionMode
+            ? IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: _exitSelectionMode,
+              )
+            : null,
+        actions: _isSelectionMode
+            ? [
+                IconButton(
+                  icon: Icon(
+                    _selectedPaths.length == _items.length
+                        ? Icons.deselect
+                        : Icons.select_all,
+                  ),
+                  tooltip: '全选/取消全选',
+                  onPressed: _selectAll,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete),
+                  tooltip: '删除选中',
+                  onPressed: _selectedPaths.isEmpty ? null : _deleteSelected,
+                ),
+              ]
+            : [
+                IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: '回收站',
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const RecyclePage(),
+                      ),
+                    );
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(Icons.file_upload_outlined),
+                  tooltip: '导入相册 ZIP',
+                  onPressed: _importGallery,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.file_download_outlined),
+                  tooltip: '导出相册 ZIP',
+                  onPressed: _exportGallery,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: () {
+                    _searchController.clear();
+                    _loadGallery();
+                  },
+                ),
+              ],
       ),
       body: Column(
         children: [
@@ -377,6 +456,98 @@ class _GalleryPageState extends State<GalleryPage>
     );
   }
 
+  void _enterSelectionMode(MediaItem item) {
+    setState(() {
+      _isSelectionMode = true;
+      _selectedPaths.clear();
+      _selectedPaths.add(item.path);
+    });
+  }
+
+  void _exitSelectionMode() {
+    setState(() {
+      _isSelectionMode = false;
+      _selectedPaths.clear();
+    });
+  }
+
+  void _toggleSelection(MediaItem item) {
+    setState(() {
+      if (_selectedPaths.contains(item.path)) {
+        _selectedPaths.remove(item.path);
+        if (_selectedPaths.isEmpty) {
+          _isSelectionMode = false;
+        }
+      } else {
+        _selectedPaths.add(item.path);
+      }
+    });
+  }
+
+  void _selectAll() {
+    setState(() {
+      if (_selectedPaths.length == _items.length) {
+        _selectedPaths.clear();
+        _isSelectionMode = false;
+      } else {
+        _selectedPaths.addAll(_items.map((i) => i.path));
+      }
+    });
+  }
+
+  Future<void> _deleteSelected() async {
+    if (_selectedPaths.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        final dialogTheme = Theme.of(ctx);
+        return AlertDialog(
+          title: const Text('确认删除'),
+          content: Text('确定要删除选中的 ${_selectedPaths.length} 项吗？'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: dialogTheme.colorScheme.error,
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirm != true) return;
+
+    final paths = _selectedPaths.toList();
+    final res = await _api.batchDelete(paths);
+    if (!mounted) return;
+    if (res.isSuccess) {
+      setState(() {
+        _items.removeWhere((i) => _selectedPaths.contains(i.path));
+        _isSelectionMode = false;
+        _selectedPaths.clear();
+      });
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('已删除 ${paths.length} 项'),
+          backgroundColor: Colors.green.shade600,
+        ),
+      );
+    } else {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(res.message ?? '删除失败'),
+          backgroundColor: Colors.red.shade600,
+        ),
+      );
+    }
+  }
+
   Future<void> _deleteItem(MediaItem item) async {
     final messenger = ScaffoldMessenger.of(context);
     final confirm = await showDialog<bool>(
@@ -413,7 +584,9 @@ class _GalleryPageState extends State<GalleryPage>
           backgroundColor: Colors.green.shade600,
         ),
       );
-      _loadGallery();
+      setState(() {
+        _items.remove(item);
+      });
     } else {
       messenger.showSnackBar(
         SnackBar(
@@ -428,7 +601,7 @@ class _GalleryPageState extends State<GalleryPage>
     if (item.isVideo) {
       Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (_) => _VideoPreviewPage(item: item, api: _api),
+          builder: (_) => _VideoPreviewPage(item: item, api: _api, onDelete: _deleteItem),
         ),
       );
     } else {
@@ -442,6 +615,7 @@ class _GalleryPageState extends State<GalleryPage>
             images: images,
             initialIndex: initialIndex,
             api: _api,
+            onDelete: _deleteItem,
           ),
         ),
       );
@@ -455,11 +629,13 @@ class _ImagePreviewPage extends StatefulWidget {
   final List<MediaItem> images;
   final int initialIndex;
   final ApiService api;
+  final Future<void> Function(MediaItem)? onDelete;
 
   const _ImagePreviewPage({
     required this.images,
     required this.initialIndex,
     required this.api,
+    this.onDelete,
   });
 
   @override
@@ -495,6 +671,16 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
           style: const TextStyle(color: Colors.white),
         ),
         iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          if (widget.onDelete != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.white),
+              onPressed: () async {
+                await widget.onDelete!(widget.images[_currentIndex]);
+                if (mounted) Navigator.pop(context);
+              },
+            ),
+        ],
       ),
       body: PageView.builder(
         controller: _pageController,
@@ -555,8 +741,9 @@ class _ImagePreviewPageState extends State<_ImagePreviewPage> {
 class _VideoPreviewPage extends StatefulWidget {
   final MediaItem item;
   final ApiService api;
+  final Future<void> Function(MediaItem)? onDelete;
 
-  const _VideoPreviewPage({required this.item, required this.api});
+  const _VideoPreviewPage({required this.item, required this.api, this.onDelete});
 
   @override
   State<_VideoPreviewPage> createState() => _VideoPreviewPageState();
@@ -643,6 +830,16 @@ class _VideoPreviewPageState extends State<_VideoPreviewPage> {
           style: const TextStyle(color: Colors.white, fontSize: 16),
         ),
         iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          if (widget.onDelete != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.white),
+              onPressed: () async {
+                await widget.onDelete!(widget.item);
+                if (mounted) Navigator.pop(context);
+              },
+            ),
+        ],
       ),
       body: GestureDetector(
         onTap: () => setState(() => _showControls = !_showControls),

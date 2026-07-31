@@ -7,6 +7,7 @@ const GalleryPage = () => import('@/pages/GalleryPage.vue')
 const SystemPage = () => import('@/pages/SystemPage.vue')
 const LogsPage = () => import('@/pages/LogsPage.vue')
 const DuplicatesPage = () => import('@/pages/DuplicatesPage.vue')
+const RecyclePage = () => import('@/pages/RecyclePage.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -15,6 +16,7 @@ const router = createRouter({
     { path: '/', redirect: '/files' },
     { path: '/files', name: 'files', component: FilesPage },
     { path: '/gallery', name: 'gallery', component: GalleryPage },
+    { path: '/recycle', name: 'recycle', component: RecyclePage },
     { path: '/system', name: 'system', component: SystemPage },
     { path: '/duplicates', name: 'duplicates', component: DuplicatesPage },
     { path: '/logs', name: 'logs', component: LogsPage },

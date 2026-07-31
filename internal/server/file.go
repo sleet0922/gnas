@@ -965,19 +965,12 @@ func HandleFileDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "不能删除根目录")
 		return
 	}
-	info, statErr := os.Stat(absPath)
-	wasDir := statErr == nil && info.IsDir()
-	markDeletedEmbeddingPath(absPath)
 
-	// 清理缩略图缓存
-	cleanThumbCache(absPath)
-
-	if err := os.RemoveAll(absPath); err != nil {
-		clearDeletedEmbeddingPath(absPath)
-		writeError(w, "删除失败")
+	// 移入回收站
+	if _, err := moveToRecycleBin(absPath); err != nil {
+		writeError(w, "删除失败: "+err.Error())
 		return
 	}
-	deleteQdrantVectorsForPath(absPath, wasDir)
 
 	writeOK(w, nil)
 }
@@ -1032,16 +1025,10 @@ func HandleFileBatchDelete(w http.ResponseWriter, r *http.Request) {
 			failed = append(failed, p)
 			continue
 		}
-		info, statErr := os.Stat(absPath)
-		wasDir := statErr == nil && info.IsDir()
-		markDeletedEmbeddingPath(absPath)
-		cleanThumbCache(absPath)
-		if err := os.RemoveAll(absPath); err != nil {
-			clearDeletedEmbeddingPath(absPath)
+		if _, err := moveToRecycleBin(absPath); err != nil {
 			failed = append(failed, p)
 			continue
 		}
-		deleteQdrantVectorsForPath(absPath, wasDir)
 	}
 
 	if len(failed) > 0 {

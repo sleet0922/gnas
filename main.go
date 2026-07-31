@@ -60,6 +60,9 @@ func main() {
 	// 启动后异步扫描生成所有媒体缩略图
 	go server.GenerateAllThumbnails()
 
+	// 启动回收站自动清理定时任务
+	server.StartRecycleBinCleanup()
+
 	// 等待退出信号
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -99,6 +102,13 @@ func startHTTPServer() error {
 	mux.HandleFunc("/api/files/flatten", protectedAPI(server.HandleFileFlatten))
 	mux.HandleFunc("/api/search", protectedAPI(server.HandleSearchPhotos))
 	mux.HandleFunc("/api/gallery/duplicates", protectedAPI(server.HandleGalleryDuplicates))
+
+	// 回收站 API
+	mux.HandleFunc("/api/recycle-bin", protectedAPI(server.HandleRecycleBinList))
+	mux.HandleFunc("/api/recycle-bin/thumb", protectedAPI(server.HandleRecycleBinThumb))
+	mux.HandleFunc("/api/recycle-bin/restore", protectedAPI(server.HandleRecycleBinRestore))
+	mux.HandleFunc("/api/recycle-bin/delete", protectedAPI(server.HandleRecycleBinDelete))
+	mux.HandleFunc("/api/recycle-bin/clear", protectedAPI(server.HandleRecycleBinClear))
 
 	// 系统信息与设置 API
 	mux.HandleFunc("/api/system", protectedAPI(server.HandleSystemInfo))

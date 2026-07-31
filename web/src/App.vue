@@ -18,6 +18,7 @@ const isLoginPage = computed(() => route.name === 'login')
 const navItems = [
   { icon: 'mdi-folder-outline', title: '文件', to: '/files' },
   { icon: 'mdi-image-multiple-outline', title: '相册', to: '/gallery' },
+  { icon: 'mdi-trash-can-outline', title: '回收站', to: '/recycle' },
   { icon: 'mdi-image-filter-center-focus', title: '查重', to: '/duplicates' },
   { icon: 'mdi-chart-donut', title: '占用', to: '/system' },
   { icon: 'mdi-console-line', title: '日志', to: '/logs' },

@@ -456,4 +456,57 @@ class ApiService {
       timeout: _duplicateTimeout,
     );
   }
+
+  // -- Recycle Bin --
+  Future<ApiResponse<List<Map<String, dynamic>>>> getRecycleBin() async {
+    return _request<List<Map<String, dynamic>>>(
+      () => http.get(
+        Uri.parse('$_baseUrl/api/recycle-bin'),
+        headers: _authHeaders,
+      ),
+      (d) => (d as List<dynamic>)
+          .map((e) => e as Map<String, dynamic>)
+          .toList(),
+    );
+  }
+
+  Future<ApiResponse<int>> restoreRecycleItems(List<int> ids) async {
+    return _request<int>(
+      () => http.post(
+        Uri.parse('$_baseUrl/api/recycle-bin/restore'),
+        headers: _jsonHeaders,
+        body: jsonEncode({'ids': ids}),
+      ),
+      (d) => (d as Map<String, dynamic>)['restored'] as int? ?? 0,
+    );
+  }
+
+  Future<ApiResponse<int>> deleteRecycleItems(List<int> ids) async {
+    return _request<int>(
+      () => http.post(
+        Uri.parse('$_baseUrl/api/recycle-bin/delete'),
+        headers: _jsonHeaders,
+        body: jsonEncode({'ids': ids}),
+      ),
+      (d) => (d as Map<String, dynamic>)['deleted'] as int? ?? 0,
+    );
+  }
+
+  Future<ApiResponse<int>> clearRecycleBin() async {
+    return _request<int>(
+      () => http.post(
+        Uri.parse('$_baseUrl/api/recycle-bin/clear'),
+        headers: _jsonHeaders,
+      ),
+      (d) => (d as Map<String, dynamic>)['cleared'] as int? ?? 0,
+    );
+  }
+
+  String getRecycleThumbUrl(int id) {
+    final params = {'id': id.toString()};
+    if (_token.isNotEmpty) params['token'] = _token;
+    return Uri.parse(
+      '$_baseUrl/api/recycle-bin/thumb',
+    ).replace(queryParameters: params).toString();
+  }
 }

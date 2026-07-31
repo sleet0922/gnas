@@ -122,6 +122,28 @@ export function getAuthGalleryExportUrl(): string {
   return `/api/gallery/export${token ? `?token=${encodeURIComponent(token)}` : ''}`
 }
 
+// 回收站缩略图 URL
+export function getRecycleThumbUrl(id: number): string {
+  const token = getToken()
+  return `/api/recycle-bin/thumb?id=${id}${token ? `&token=${encodeURIComponent(token)}` : ''}`
+}
+
+export async function apiGetRecycleBin(): Promise<RecycleItem[] | null> {
+  return apiGet<RecycleItem[]>('/api/recycle-bin')
+}
+
+export async function apiRestoreRecycleItems(ids: number[]): Promise<{ restored: number } | null> {
+  return apiPost<{ restored: number }>('/api/recycle-bin/restore', { ids })
+}
+
+export async function apiDeleteRecycleItems(ids: number[]): Promise<{ deleted: number } | null> {
+  return apiPost<{ deleted: number }>('/api/recycle-bin/delete', { ids })
+}
+
+export async function apiClearRecycleBin(): Promise<{ cleared: number } | null> {
+  return apiPost<{ cleared: number }>('/api/recycle-bin/clear', {})
+}
+
 export async function apiImportGallery(file: File): Promise<{ imported: number } | null> {
   const form = new FormData()
   form.append('file', file)
@@ -163,6 +185,17 @@ export interface MediaItem {
   type: 'image' | 'video'
   size: number
   modTime: string
+}
+
+// 回收站文件
+export interface RecycleItem {
+  id: number
+  name: string
+  isVideo: boolean
+  isDir: boolean
+  hasThumb: boolean
+  deletedAt: string
+  expireAt: string
 }
 
 // 系统信息
