@@ -144,6 +144,34 @@ export async function apiClearRecycleBin(): Promise<{ cleared: number } | null> 
   return apiPost<{ cleared: number }>('/api/recycle-bin/clear', {})
 }
 
+// 无用资源扫描/清理
+export interface StaleResourceGroup {
+  count: number
+  sizeBytes: number
+  files: string[]
+}
+
+export interface StaleScanResult {
+  thumbnails: StaleResourceGroup
+  vectorThumbnails: StaleResourceGroup
+  vectors: StaleResourceGroup
+}
+
+export interface StaleCleanupResult {
+  thumbnails: StaleResourceGroup
+  vectorThumbnails: StaleResourceGroup
+  vectors: StaleResourceGroup
+  totalFreedBytes: number
+}
+
+export async function apiScanStaleResources(): Promise<StaleScanResult | null> {
+  return apiGet<StaleScanResult>('/api/system/stale-scan')
+}
+
+export async function apiCleanupStaleResources(): Promise<StaleCleanupResult | null> {
+  return apiPost<StaleCleanupResult>('/api/system/stale-cleanup', {})
+}
+
 export async function apiImportGallery(file: File): Promise<{ imported: number } | null> {
   const form = new FormData()
   form.append('file', file)

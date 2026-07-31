@@ -112,6 +112,8 @@ func startHTTPServer() error {
 
 	// 系统信息与设置 API
 	mux.HandleFunc("/api/system", protectedAPI(server.HandleSystemInfo))
+	mux.HandleFunc("/api/system/stale-scan", protectedAPI(server.HandleStaleScan))
+	mux.HandleFunc("/api/system/stale-cleanup", protectedAPI(server.HandleStaleCleanup))
 	mux.HandleFunc("/api/settings", protectedAPI(server.HandleGetSettings))
 	mux.HandleFunc("/api/settings/update", protectedAPI(server.HandleUpdateSettings))
 

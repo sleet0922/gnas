@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { apiGet, apiPost, type SystemInfo } from '@/composables/useApi'
+import { apiGet, apiPost, apiScanStaleResources, apiCleanupStaleResources, type SystemInfo, type StaleScanResult } from '@/composables/useApi'
 
 const info = ref<SystemInfo | null>(null)
 let timer: ReturnType<typeof setInterval>
@@ -141,6 +141,56 @@ async function loadInfo() {
     if (data) info.value = data
   } catch (e) {
     console.error('加载系统信息失败:', e)
+  }
+}
+
+// 无用资源扫描与清理
+const staleScanning = ref(false)
+const staleCleaning = ref(false)
+const staleResult = ref<StaleScanResult | null>(null)
+const staleScanError = ref('')
+const staleCleanedMsg = ref('')
+
+const staleTotalCount = computed(() => {
+  if (!staleResult.value) return 0
+  return staleResult.value.thumbnails.count + staleResult.value.vectorThumbnails.count + staleResult.value.vectors.count
+})
+
+const staleTotalSize = computed(() => {
+  if (!staleResult.value) return 0
+  return staleResult.value.thumbnails.sizeBytes + staleResult.value.vectorThumbnails.sizeBytes
+})
+
+async function scanStale() {
+  staleScanning.value = true
+  staleScanError.value = ''
+  staleCleanedMsg.value = ''
+  try {
+    const data = await apiScanStaleResources()
+    staleResult.value = data
+  } catch (e: any) {
+    staleScanError.value = e.message || '扫描失败'
+  } finally {
+    staleScanning.value = false
+  }
+}
+
+async function cleanupStale() {
+  if (staleTotalCount.value === 0) return
+  if (!confirm(`确认清理 ${staleTotalCount.value} 个无用资源（${formatBytes(staleTotalSize.value)}）？此操作不可撤销。`)) return
+  staleCleaning.value = true
+  staleCleanedMsg.value = ''
+  try {
+    const data = await apiCleanupStaleResources()
+    if (data) {
+      const freed = formatBytes(data.totalFreedBytes)
+      staleCleanedMsg.value = `已清理：缩略图 ${data.thumbnails.count} 个、向量缩略图 ${data.vectorThumbnails.count} 个、向量 ${data.vectors.count} 个，释放 ${freed} 空间`
+      staleResult.value = null
+    }
+  } catch (e: any) {
+    staleScanError.value = e.message || '清理失败'
+  } finally {
+    staleCleaning.value = false
   }
 }
 
@@ -426,6 +476,112 @@ onUnmounted(() => clearInterval(timer))
           <div class="text-body-2">{{ formatBytes(info.diskTotal) }}</div>
         </v-col>
       </v-row>
+    </v-card>
+
+    <!-- 无用资源扫描清理 -->
+    <v-card color="surface-variant" class="pa-5 mt-4">
+      <div class="d-flex align-center ga-3 mb-2">
+        <v-icon color="primary">mdi-broom</v-icon>
+        <span class="text-subtitle-1 font-weight-medium">无用资源清理</span>
+      </div>
+      <div class="text-caption text-medium-emphasis mb-4">
+        扫描原图已删除但缩略图/向量未同步清理的残留文件。包括：普通缩略图、向量专用缩略图、Qdrant 向量。
+      </div>
+
+      <div class="d-flex ga-3 mb-4 flex-wrap">
+        <v-btn
+          color="primary"
+          variant="tonal"
+          prepend-icon="mdi-magnify-scan"
+          :loading="staleScanning"
+          :disabled="staleScanning || staleCleaning"
+          @click="scanStale"
+        >
+          扫描无用资源
+        </v-btn>
+        <v-btn
+          v-if="staleResult && staleTotalCount > 0"
+          color="error"
+          variant="tonal"
+          prepend-icon="mdi-delete-sweep"
+          :loading="staleCleaning"
+          :disabled="staleScanning || staleCleaning"
+          @click="cleanupStale"
+        >
+          清理 {{ staleTotalCount }} 项（{{ formatBytes(staleTotalSize) }}）
+        </v-btn>
+      </div>
+
+      <v-alert v-if="staleScanError" type="error" variant="tonal" class="mb-3" closable @click:close="staleScanError = ''">
+        {{ staleScanError }}
+      </v-alert>
+
+      <v-alert v-if="staleCleanedMsg" type="success" variant="tonal" class="mb-3" closable @click:close="staleCleanedMsg = ''">
+        {{ staleCleanedMsg }}
+      </v-alert>
+
+      <div v-if="staleResult">
+        <v-row>
+          <v-col cols="12" md="4">
+            <v-card variant="outlined" class="pa-3">
+              <div class="d-flex align-center ga-2 mb-1">
+                <v-icon size="18" color="info">mdi-image-multiple-outline</v-icon>
+                <span class="text-body-2 font-weight-medium">普通缩略图</span>
+              </div>
+              <div class="text-h6">{{ staleResult.thumbnails.count }} 个</div>
+              <div class="text-caption text-on-surface-variant">{{ formatBytes(staleResult.thumbnails.sizeBytes) }}</div>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="4">
+            <v-card variant="outlined" class="pa-3">
+              <div class="d-flex align-center ga-2 mb-1">
+                <v-icon size="18" color="warning">mdi-vector-curve</v-icon>
+                <span class="text-body-2 font-weight-medium">向量缩略图</span>
+              </div>
+              <div class="text-h6">{{ staleResult.vectorThumbnails.count }} 个</div>
+              <div class="text-caption text-on-surface-variant">{{ formatBytes(staleResult.vectorThumbnails.sizeBytes) }}</div>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="4">
+            <v-card variant="outlined" class="pa-3">
+              <div class="d-flex align-center ga-2 mb-1">
+                <v-icon size="18" color="error">mdi-database-remove-outline</v-icon>
+                <span class="text-body-2 font-weight-medium">Qdrant 向量</span>
+              </div>
+              <div class="text-h6">{{ staleResult.vectors.count }} 个</div>
+              <div class="text-caption text-on-surface-variant">无关联原图</div>
+            </v-card>
+          </v-col>
+        </v-row>
+
+        <v-expansion-panels v-if="staleTotalCount > 0" class="mt-3">
+          <v-expansion-panel>
+            <v-expansion-panel-title class="text-body-2">
+              查看残留文件列表
+            </v-expansion-panel-title>
+            <v-expansion-panel-text>
+              <div v-if="staleResult.thumbnails.files.length" class="mb-3">
+                <div class="text-caption font-weight-bold mb-1">普通缩略图：</div>
+                <div class="text-caption text-on-surface-variant" style="word-break: break-all; max-height: 150px; overflow-y: auto;">
+                  {{ staleResult.thumbnails.files.join('、') }}
+                </div>
+              </div>
+              <div v-if="staleResult.vectorThumbnails.files.length" class="mb-3">
+                <div class="text-caption font-weight-bold mb-1">向量缩略图：</div>
+                <div class="text-caption text-on-surface-variant" style="word-break: break-all; max-height: 150px; overflow-y: auto;">
+                  {{ staleResult.vectorThumbnails.files.join('、') }}
+                </div>
+              </div>
+              <div v-if="staleResult.vectors.files.length">
+                <div class="text-caption font-weight-bold mb-1">Qdrant 向量：</div>
+                <div class="text-caption text-on-surface-variant" style="word-break: break-all; max-height: 150px; overflow-y: auto;">
+                  {{ staleResult.vectors.files.join('、') }}
+                </div>
+              </div>
+            </v-expansion-panel-text>
+          </v-expansion-panel>
+        </v-expansion-panels>
+      </div>
     </v-card>
   </div>
 
