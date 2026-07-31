@@ -35,7 +35,7 @@ const galleryScrollTop = ref(0)
 const galleryViewportHeight = ref(600)
 const galleryViewportWidth = ref(800)
 const galleryGap = 12
-const galleryMinCardWidth = 160
+const galleryMinCardWidth = 120
 const galleryOverscanRows = 2
 
 const galleryColumns = computed(() => {
@@ -72,6 +72,17 @@ function measureGalleryViewport() {
   if (!galleryViewport.value) return
   galleryViewportWidth.value = galleryViewport.value.clientWidth
   galleryViewportHeight.value = galleryViewport.value.clientHeight
+}
+
+// 在 galleryViewport 元素出现后（loading 从 true 变 false）初始化测量和 ResizeObserver
+function setupGalleryViewport() {
+  nextTick(() => {
+    measureGalleryViewport()
+    if (galleryViewport.value && !galleryResizeObserver) {
+      galleryResizeObserver = new ResizeObserver(measureGalleryViewport)
+      galleryResizeObserver.observe(galleryViewport.value)
+    }
+  })
 }
 
 function onGalleryScroll(event: Event) {
@@ -112,6 +123,7 @@ async function handleSearch() {
     alert(e.message || '搜索失败')
   } finally {
     loading.value = false
+    setupGalleryViewport()
   }
 }
 
@@ -145,6 +157,7 @@ async function loadGallery() {
     alert(e instanceof Error ? e.message : '加载相册失败')
   } finally {
     loading.value = false
+    setupGalleryViewport()
   }
 }
 
@@ -325,13 +338,6 @@ async function confirmBatchDelete() {
 onMounted(() => {
   loadGallery()
   checkAISettings()
-  nextTick(() => {
-    measureGalleryViewport()
-    if (galleryViewport.value) {
-      galleryResizeObserver = new ResizeObserver(measureGalleryViewport)
-      galleryResizeObserver.observe(galleryViewport.value)
-    }
-  })
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('click', closeContextMenu)
   window.addEventListener('scroll', closeContextMenu, true)
