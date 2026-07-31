@@ -249,10 +249,20 @@ function runContextAction(action: 'preview' | 'download' | 'delete') {
 // 删除单个
 async function deleteItem(item: MediaItem) {
   const previousScrollTop = galleryViewport.value?.scrollTop ?? galleryScrollTop.value
+  // 记录删除前在过滤后列表中的索引，用于预览顺位切换到下一张
+  const deletedIdx = filteredItems.value.findIndex(i => i.path === item.path)
   try {
     await apiPost('/api/files/delete', { path: item.path })
     items.value = items.value.filter(i => i.path !== item.path)
-    if (previewItem.value?.path === item.path) closePreview()
+    // 如果当前预览的是被删除的项，顺位切换到下一张（无下一张则切上一张，都没有才关闭）
+    if (previewItem.value?.path === item.path) {
+      const next = filteredItems.value[deletedIdx] || filteredItems.value[deletedIdx - 1] || null
+      if (next) {
+        previewItem.value = next
+      } else {
+        closePreview()
+      }
+    }
     await nextTick()
     if (galleryViewport.value) {
       const maxScrollTop = galleryViewport.value.scrollHeight - galleryViewport.value.clientHeight
