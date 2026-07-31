@@ -1,11 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import LoginPage from '@/pages/LoginPage.vue'
-import FilesPage from '@/pages/FilesPage.vue'
-import GalleryPage from '@/pages/GalleryPage.vue'
-import SystemPage from '@/pages/SystemPage.vue'
-import LogsPage from '@/pages/LogsPage.vue'
-import DuplicatesPage from '@/pages/DuplicatesPage.vue'
 import { getToken } from '@/composables/useApi'
+
+const LoginPage = () => import('@/pages/LoginPage.vue')
+const FilesPage = () => import('@/pages/FilesPage.vue')
+const GalleryPage = () => import('@/pages/GalleryPage.vue')
+const SystemPage = () => import('@/pages/SystemPage.vue')
+const LogsPage = () => import('@/pages/LogsPage.vue')
+const DuplicatesPage = () => import('@/pages/DuplicatesPage.vue')
 
 const router = createRouter({
   history: createWebHistory(),

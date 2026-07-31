@@ -15,6 +15,14 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vuetify: ['vuetify'],
+          vendor: ['vue', 'vue-router'],
+        },
+      },
+    },
   },
   server: {
     proxy: {

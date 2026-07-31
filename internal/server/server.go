@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,13 +56,39 @@ func ClearLogs() {
 
 var startTime = time.Now()
 
-// 登录检测
-type loginDetect struct {
-	failedTimes uint32
-	mu          sync.Mutex
+// Version 版本号，由 main.go 注入
+var Version = "DEV"
+
+// 登录限制器：按 IP+用户名+时间窗口
+type loginAttempt struct {
+	failures    int
+	lockedUntil time.Time
 }
 
-var ld = &loginDetect{}
+type loginLimiter struct {
+	mu       sync.Mutex
+	attempts map[string]*loginAttempt // key: IP+username
+}
+
+var ld = &loginLimiter{attempts: make(map[string]*loginAttempt)}
+
+// getClientIP 从请求中提取客户端 IP
+func getClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if idx := strings.Index(xff, ","); idx > 0 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
 
 // JSON 响应辅助
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -125,15 +153,6 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ld.mu.Lock()
-	if ld.failedTimes >= 5 {
-		ld.failedTimes++
-		ld.mu.Unlock()
-		writeError(w, "登录失败次数过多，请稍后再试")
-		return
-	}
-	ld.mu.Unlock()
-
 	var data struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -148,11 +167,35 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 按 IP+用户名 检查登录锁定状态
+	limiterKey := getClientIP(r) + ":" + data.Username
+
+	ld.mu.Lock()
+	attempt := ld.attempts[limiterKey]
+	if attempt == nil {
+		attempt = &loginAttempt{}
+		ld.attempts[limiterKey] = attempt
+	}
+	if !attempt.lockedUntil.IsZero() && time.Now().Before(attempt.lockedUntil) {
+		ld.mu.Unlock()
+		writeError(w, "登录失败次数过多，请 15 分钟后再试")
+		return
+	}
+	// 锁定过期后自动重置计数
+	if !attempt.lockedUntil.IsZero() && !time.Now().Before(attempt.lockedUntil) {
+		attempt.failures = 0
+		attempt.lockedUntil = time.Time{}
+	}
+	ld.mu.Unlock()
+
 	// 从 SQLite 验证
 	user, err := db.GetUser(data.Username)
 	if err != nil || user == nil {
 		ld.mu.Lock()
-		ld.failedTimes++
+		attempt.failures++
+		if attempt.failures >= 5 {
+			attempt.lockedUntil = time.Now().Add(15 * time.Minute)
+		}
 		ld.mu.Unlock()
 		writeError(w, "用户名或密码错误")
 		return
@@ -160,7 +203,8 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if checkPassword(user.Password, data.Password) {
 		ld.mu.Lock()
-		ld.failedTimes = 0
+		attempt.failures = 0
+		attempt.lockedUntil = time.Time{}
 		ld.mu.Unlock()
 
 		token, err := issueToken(user.Username)
@@ -169,21 +213,30 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 检测是否使用默认密码 (root/root)
+		mustChange := data.Username == "root" && data.Password == "root"
 		writeOK(w, map[string]interface{}{
-			"success": true,
-			"token":   token,
+			"success":              true,
+			"token":                token,
+			"must_change_password": mustChange,
 		})
 		return
 	}
 
 	ld.mu.Lock()
-	ld.failedTimes++
+	attempt.failures++
+	if attempt.failures >= 5 {
+		attempt.lockedUntil = time.Now().Add(15 * time.Minute)
+	}
 	ld.mu.Unlock()
 	writeError(w, "用户名或密码错误")
 }
 
 // HandleLogout 登出
 func HandleLogout(w http.ResponseWriter, r *http.Request) {
+	if token := tokenFromRequest(r); token != "" {
+		RevokeToken(token)
+	}
 	writeOK(w, nil)
 }
 
@@ -203,8 +256,8 @@ func HandleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(data.NewPassword) < 4 {
-		writeError(w, "新密码至少 4 个字符")
+	if len(data.NewPassword) < 8 {
+		writeError(w, "新密码至少 8 个字符")
 		return
 	}
 
@@ -255,12 +308,14 @@ func HandleClearLogs(w http.ResponseWriter, r *http.Request) {
 func HandleStatus(w http.ResponseWriter, r *http.Request) {
 	var username string
 	rows, err := db.GetDB().Query("SELECT username FROM users LIMIT 1")
-	if err == nil && rows.Next() {
-		rows.Scan(&username)
-		rows.Close()
+	if err == nil {
+		defer rows.Close()
+		if rows.Next() {
+			rows.Scan(&username)
+		}
 	}
 	writeOK(w, map[string]interface{}{
-		"version":  "1.0.0",
+		"version":  Version,
 		"username": username,
 	})
 }

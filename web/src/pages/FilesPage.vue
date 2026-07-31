@@ -144,15 +144,21 @@ function openPreview(item: FileItem) {
 async function loadFiles(dir?: string, preserveScroll = false) {
   const previousScrollTop = fileViewport.value?.scrollTop ?? fileScrollTop.value
   loading.value = true
-  const path = dir ?? currentPath.value
-  const data = await apiGet<FileItem[]>('/api/files?path=' + encodeURIComponent(path))
-  files.value = data || []
-  currentPath.value = path
-  loading.value = false
-  nextTick(() => preserveScroll ? restoreFileScroll(previousScrollTop) : resetFileScroll())
-  // 退出选择模式
-  selectMode.value = false
-  selectedPaths.value.clear()
+  try {
+    const path = dir ?? currentPath.value
+    const data = await apiGet<FileItem[]>('/api/files?path=' + encodeURIComponent(path))
+    files.value = data || []
+    currentPath.value = path
+    nextTick(() => preserveScroll ? restoreFileScroll(previousScrollTop) : resetFileScroll())
+    // 退出选择模式
+    selectMode.value = false
+    selectedPaths.value.clear()
+  } catch (e: unknown) {
+    console.error('加载文件失败:', e)
+    showMsg(e instanceof Error ? e.message : '加载文件失败')
+  } finally {
+    loading.value = false
+  }
 }
 
 function enterDir(item: FileItem) {
@@ -336,7 +342,7 @@ async function confirmFlatten() {
 }
 
 function downloadFile(item: FileItem) {
-  window.open(getAuthDownloadUrl(item.path))
+  window.open(getAuthDownloadUrl(item.path), '_blank', 'noopener')
 }
 
 async function onFileChange(e: Event) {

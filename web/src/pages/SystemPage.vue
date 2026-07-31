@@ -71,17 +71,21 @@ const sslKeyFile = ref('/ssl/1.key')
 const updatingSSL = ref(false)
 
 async function loadSettings() {
-  const data = await apiGet<{
-    ai_enabled: boolean
-    ssl_enabled: boolean
-    ssl_cert_file: string
-    ssl_key_file: string
-  }>('/api/settings')
-  if (data) {
-    aiEnabled.value = data.ai_enabled
-    sslEnabled.value = data.ssl_enabled
-    sslCertFile.value = data.ssl_cert_file
-    sslKeyFile.value = data.ssl_key_file
+  try {
+    const data = await apiGet<{
+      ai_enabled: boolean
+      ssl_enabled: boolean
+      ssl_cert_file: string
+      ssl_key_file: string
+    }>('/api/settings')
+    if (data) {
+      aiEnabled.value = data.ai_enabled
+      sslEnabled.value = data.ssl_enabled
+      sslCertFile.value = data.ssl_cert_file
+      sslKeyFile.value = data.ssl_key_file
+    }
+  } catch (e) {
+    console.error('加载设置失败:', e)
   }
 }
 
@@ -132,8 +136,12 @@ async function saveSSLSettings() {
 }
 
 async function loadInfo() {
-  const data = await apiGet<SystemInfo>('/api/system')
-  if (data) info.value = data
+  try {
+    const data = await apiGet<SystemInfo>('/api/system')
+    if (data) info.value = data
+  } catch (e) {
+    console.error('加载系统信息失败:', e)
+  }
 }
 
 onMounted(() => {
@@ -399,7 +407,7 @@ onUnmounted(() => clearInterval(timer))
         </span>
       </div>
       <v-progress-linear
-        :model-value="Math.round((info.diskUsed / info.diskTotal) * 100)"
+        :model-value="info.diskTotal > 0 ? Math.round((info.diskUsed / info.diskTotal) * 100) : 0"
         color="success"
         height="8"
         rounded

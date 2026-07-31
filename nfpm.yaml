@@ -17,6 +17,10 @@ contents:
     dst: /lib/systemd/system/gnas.service
     file_info:
       mode: 0644
+  - src: deploy/qdrant.service
+    dst: /lib/systemd/system/qdrant.service
+    file_info:
+      mode: 0644
   - dst: /var/lib/gnas
     type: dir
     file_info:

@@ -27,15 +27,20 @@ function formatBytes(bytes: number): string {
 }
 
 async function checkAISettings() {
-  const data = await apiGet<{ ai_enabled: boolean }>('/api/settings')
-  if (data) {
-    aiEnabled.value = data.ai_enabled
-    if (aiEnabled.value) {
-      await loadDuplicates()
+  try {
+    const data = await apiGet<{ ai_enabled: boolean }>('/api/settings')
+    if (data) {
+      aiEnabled.value = data.ai_enabled
+      if (aiEnabled.value) {
+        await loadDuplicates()
+      } else {
+        loading.value = false
+      }
     } else {
       loading.value = false
     }
-  } else {
+  } catch (e) {
+    console.error('检查 AI 设置失败:', e)
     loading.value = false
   }
 }
@@ -70,19 +75,16 @@ function closePreview() {
   previewItem.value = null
 }
 
-async function deleteItem(item: MediaItem, groupIdx: number) {
+async function deleteItem(item: MediaItem) {
   if (!confirm(`确定要删除 ${item.name} 吗？此操作不可撤销。`)) return
   try {
     await apiPost('/api/files/delete', { path: item.path })
-    // 从列表中移除
-    const group = duplicateGroups.value[groupIdx]
-    group.items = group.items.filter(i => i.path !== item.path)
-    
-    // 如果组内剩下的有效项小于2个，直接移除整个组
-    if (group.items.length < 2) {
-      duplicateGroups.value.splice(groupIdx, 1)
-    }
-    
+    // 删除后,如果组内剩余 < 2 项,则从列表中移除该组
+    const pathsToDelete = [item.path]
+    const filtered = duplicateGroups.value
+      .map(g => ({ ...g, items: g.items.filter(it => !pathsToDelete.includes(it.path)) }))
+      .filter(g => g.items.length >= 2)
+    duplicateGroups.value = filtered
     if (previewItem.value?.path === item.path) closePreview()
   } catch (e: any) {
     alert(e.message || '删除失败')
@@ -161,7 +163,7 @@ onMounted(() => {
                 size="x-small"
                 color="error"
                 variant="flat"
-                @click.stop="deleteItem(item, groupIdx)"
+                @click.stop="deleteItem(item)"
               />
             </div>
             

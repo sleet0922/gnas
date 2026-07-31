@@ -145,6 +145,9 @@ type procCPUTime struct {
 }
 
 func readCPUTime() (cpuTime, error) {
+	if runtime.GOOS != "linux" {
+		return cpuTime{}, fmt.Errorf("not supported on %s", runtime.GOOS)
+	}
 	data, err := os.ReadFile("/proc/stat")
 	if err != nil {
 		return cpuTime{}, err
@@ -156,6 +159,9 @@ func readCPUTime() (cpuTime, error) {
 }
 
 func readProcCPUTime() (procCPUTime, error) {
+	if runtime.GOOS != "linux" {
+		return procCPUTime{}, fmt.Errorf("not supported on %s", runtime.GOOS)
+	}
 	data, err := os.ReadFile("/proc/self/stat")
 	if err != nil {
 		return procCPUTime{}, err

@@ -146,13 +146,7 @@ func markDeletedEmbeddingPath(path string) {
 
 func clearDeletedEmbeddingPath(path string) {
 	path = filepath.Clean(path)
-	deletedEmbeddingPaths.Range(func(key, _ interface{}) bool {
-		deletedPath := key.(string)
-		if path == deletedPath || strings.HasPrefix(path, deletedPath+string(filepath.Separator)) {
-			deletedEmbeddingPaths.Delete(key)
-		}
-		return true
-	})
+	deletedEmbeddingPaths.Delete(path)
 }
 
 func isDeletedEmbeddingPath(path string) bool {
@@ -209,6 +203,9 @@ func initQdrantCollection() {
 			return
 		}
 	} else if resp != nil {
+		if resp.StatusCode >= 300 {
+			log.Printf("[Qdrant] 检查集合状态返回 HTTP %d", resp.StatusCode)
+		}
 		resp.Body.Close()
 	}
 
@@ -355,7 +352,7 @@ func generateImageEmbedding(absPath string) {
 	req, _ := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/collections/%s/points?wait=true", qdrantURL, collection), bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[Qdrant] 存储向量失败 %s: %v (耗时: %s)", filename, err, duration())
@@ -452,6 +449,11 @@ func getQdrantIndexedPaths() (map[string]struct{}, error) {
 		if err != nil {
 			return nil, err
 		}
+		if resp.StatusCode >= 300 {
+			responseBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("Qdrant scroll returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+		}
 		var result struct {
 			Result struct {
 				Points         []qdrantPathPoint `json:"points"`
@@ -546,7 +548,8 @@ func HandleSearchPhotos(w http.ResponseWriter, r *http.Request) {
 	}
 	body, _ := json.Marshal(payload)
 
-	resp, err := http.Post(fmt.Sprintf("%s/collections/%s/points/search", qdrantURL, collection), "application/json", bytes.NewBuffer(body))
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(fmt.Sprintf("%s/collections/%s/points/search", qdrantURL, collection), "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		writeError(w, "搜索引擎请求失败")
 		return
@@ -867,13 +870,12 @@ func handleGalleryDuplicatesLegacy(w http.ResponseWriter, r *http.Request) {
 		maxScore[i] = 0.0
 	}
 
-	var find func(int) int
-	find = func(i int) int {
-		if parent[i] == i {
-			return i
+	find := func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]] // 路径压缩
+			i = parent[i]
 		}
-		parent[i] = find(parent[i])
-		return parent[i]
+		return i
 	}
 
 	union := func(i, j int, score float32) {

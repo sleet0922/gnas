@@ -93,8 +93,7 @@ func migrate() error {
 
 // QueryOne 查询单行
 func QueryOne(dest interface{}, query string, args ...interface{}) error {
-	// 由调用方自行 scan
-	return nil
+	return fmt.Errorf("QueryOne not implemented")
 }
 
 // GetSetting 获取设置

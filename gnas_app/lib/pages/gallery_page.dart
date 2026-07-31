@@ -95,12 +95,20 @@ class _GalleryPageState extends State<GalleryPage>
 
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(const SnackBar(content: Text('正在上传...')));
 
     int success = 0;
     int failed = 0;
-    for (final asset in assets) {
-      final file = await asset.originFile;
+    for (int i = 0; i < assets.length; i++) {
+      if (!mounted) return;
+      messenger
+        ..clearSnackBars()
+        ..showSnackBar(
+          SnackBar(
+            content: Text('正在上传 ${i + 1}/${assets.length}...'),
+            duration: const Duration(minutes: 5),
+          ),
+        );
+      final file = await assets[i].originFile;
       if (file == null) {
         failed++;
         continue;
@@ -114,6 +122,7 @@ class _GalleryPageState extends State<GalleryPage>
     }
 
     if (!mounted) return;
+    messenger.clearSnackBars();
     if (failed == 0) {
       messenger.showSnackBar(
         SnackBar(

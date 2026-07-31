@@ -3,17 +3,20 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/api_response.dart';
 import '../models/system_info.dart';
 import '../models/file_info.dart';
 import '../models/media_item.dart';
 
 class ApiService {
+  static const String defaultUrl = '';
   static const String _hostKey = 'host_address';
   static const String _usernameKey = 'saved_username';
   static const String _passwordKey = 'saved_password';
   static const String _tokenKey = 'auth_token';
-  static String _baseUrl = 'http://192.168.1.100:8082';
+  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+  static String _baseUrl = defaultUrl;
   static String _token = '';
   static const Duration _timeout = Duration(seconds: 20);
   static const Duration _duplicateTimeout = Duration(minutes: 10);
@@ -68,7 +71,7 @@ class ApiService {
   Future<void> loadSaved() async {
     final prefs = await SharedPreferences.getInstance();
     _baseUrl = normalizeUrl(
-      prefs.getString(_hostKey) ?? 'http://192.168.1.100:8082',
+      prefs.getString(_hostKey) ?? defaultUrl,
     );
     _token = prefs.getString(_tokenKey) ?? '';
   }
@@ -82,10 +85,11 @@ class ApiService {
   Future<Map<String, String>> loadCredentials() async {
     final prefs = await SharedPreferences.getInstance();
     _token = prefs.getString(_tokenKey) ?? '';
+    final password = await _secureStorage.read(key: _passwordKey) ?? '';
     return {
       'username': prefs.getString(_usernameKey) ?? '',
-      'password': prefs.getString(_passwordKey) ?? '',
-      'host': prefs.getString(_hostKey) ?? 'http://192.168.1.100:8082',
+      'password': password,
+      'host': prefs.getString(_hostKey) ?? defaultUrl,
     };
   }
 
@@ -96,7 +100,7 @@ class ApiService {
   ) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_usernameKey, username);
-    await prefs.setString(_passwordKey, password);
+    await _secureStorage.write(key: _passwordKey, value: password);
     await prefs.setString(_hostKey, normalizeUrl(host));
     _baseUrl = normalizeUrl(host);
   }
@@ -106,7 +110,7 @@ class ApiService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_tokenKey);
     if (clearSavedPassword) {
-      await prefs.remove(_passwordKey);
+      await _secureStorage.delete(key: _passwordKey);
     }
   }
 
@@ -357,9 +361,22 @@ class ApiService {
   }
 
   Future<http.Response> exportGallery() async {
-    return http
-        .get(Uri.parse('$_baseUrl/api/gallery/export'), headers: _authHeaders)
-        .timeout(_archiveTimeout);
+    try {
+      return await http
+          .get(
+            Uri.parse('$_baseUrl/api/gallery/export'),
+            headers: _authHeaders,
+          )
+          .timeout(_archiveTimeout);
+    } on SocketException {
+      throw Exception('无法连接服务器');
+    } on TimeoutException {
+      throw Exception('请求超时');
+    } on http.ClientException catch (e) {
+      throw Exception('网络请求失败: ${e.message}');
+    } catch (e) {
+      throw Exception('导出失败: $e');
+    }
   }
 
   Future<ApiResponse<int>> importGallery(File file) async {
@@ -427,13 +444,15 @@ class ApiService {
     );
   }
 
-  Future<ApiResponse<List<dynamic>>> getDuplicates() async {
-    return _request<List<dynamic>>(
+  Future<ApiResponse<List<DuplicateGroup>>> getDuplicates() async {
+    return _request<List<DuplicateGroup>>(
       () => http.get(
         Uri.parse('$_baseUrl/api/gallery/duplicates'),
         headers: _authHeaders,
       ),
-      (d) => d as List<dynamic>,
+      (d) => (d as List<dynamic>)
+          .map((e) => DuplicateGroup.fromJson(e as Map<String, dynamic>))
+          .toList(),
       timeout: _duplicateTimeout,
     );
   }

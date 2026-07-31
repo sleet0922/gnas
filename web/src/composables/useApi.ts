@@ -20,13 +20,38 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T | nul
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(opts.headers as Record<string, string> || {}),
   }
-  
-  const res = await fetch(BASE + path, { ...opts, headers })
-  const data = await res.json()
-  if (data.code !== 0 && data.code !== undefined) {
-    throw new Error(data.message || '操作失败')
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 30000)
+  try {
+    const url = BASE + path
+    const res = await fetch(url, { ...opts, headers, signal: controller.signal })
+    if (!res.ok) {
+      // 尝试解析 JSON 错误,失败则用 HTTP 状态码
+      let msg = `HTTP ${res.status}`
+      try {
+        const data = await res.json()
+        if (data.message) msg = data.message
+        else if (data.error) msg = data.error
+      } catch {
+        // 非 JSON 响应,用状态文本
+        msg = `${res.status} ${res.statusText}`
+      }
+      // 401 时清除 token 并跳转登录
+      if (res.status === 401) {
+        localStorage.removeItem(TOKEN_KEY)
+        window.location.href = '/login'
+      }
+      throw new Error(msg)
+    }
+    const data = await res.json()
+    if (data.code !== 0) {
+      throw new Error(data.message || data.error || 'Request failed')
+    }
+    return data.data as T
+  } finally {
+    clearTimeout(timeoutId)
   }
-  return data.data as T
 }
 
 export function apiGet<T>(path: string): Promise<T | null> {
@@ -72,6 +97,21 @@ export async function apiUpload(path: string, file: File, dir: string): Promise<
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
   })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const data = await res.json()
+      if (data.message) msg = data.message
+      else if (data.error) msg = data.error
+    } catch {
+      msg = `${res.status} ${res.statusText}`
+    }
+    if (res.status === 401) {
+      localStorage.removeItem(TOKEN_KEY)
+      window.location.href = '/login'
+    }
+    throw new Error(msg)
+  }
   const data = await res.json()
   if (data.code !== 0) throw new Error(data.message || '上传失败')
   return null

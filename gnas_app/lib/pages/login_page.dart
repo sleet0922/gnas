@@ -18,7 +18,7 @@ class _LoginPageState extends State<LoginPage> {
   bool _obscurePassword = true;
   String? _error;
   bool _showHostConfig = false;
-  bool _savingCredentials = true;
+  bool _savingCredentials = false;
 
   @override
   void initState() {

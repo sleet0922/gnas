@@ -145,6 +145,19 @@ func repairVirtualEnvPaths(envPath string) {
 	}
 }
 
+// qdrantServicePath 是 qdrant.service 的安装路径（由 nfpm deb 包安装）。
+const qdrantServicePath = "/lib/systemd/system/qdrant.service"
+
+// hasQdrantServiceFile 检查 qdrant.service 是否存在（nfpm 安装位置或手动创建位置）。
+func hasQdrantServiceFile() bool {
+	for _, p := range []string{qdrantServicePath, "/etc/systemd/system/qdrant.service"} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckAndInstallAI detects and starts the embedding service and Qdrant.
 func CheckAndInstallAI() {
 	migrateAIStorageDirs()
@@ -258,8 +271,19 @@ func checkAndInstallPythonVLM() {
 	log.Println("[AI 初始化] 正在拉起后台多模态向量服务...")
 	if err := serverCmd.Start(); err != nil {
 		log.Printf("[AI 初始化] 启动多模态向量服务失败: %v", err)
+		if logFile != nil {
+			logFile.Close()
+		}
 		return
 	}
+
+	go func() {
+		err := serverCmd.Wait()
+		if logFile != nil {
+			logFile.Close()
+		}
+		log.Printf("[AI 初始化] 多模态向量服务退出: %v", err)
+	}()
 
 	// 7. Wait for the ModelScope model download and initial load.
 	log.Println("[AI 初始化] 正在下载并加载 Qwen3-VL-Embedding-2B，首次启动需要几分钟...")
@@ -297,41 +321,58 @@ func checkAndInstallQdrant() {
 		return
 	}
 
-	log.Println("[AI 初始化] 未检测到运行中的 Qdrant，准备安装...")
+	log.Println("[AI 初始化] 未检测到运行中的 Qdrant，准备启动...")
 	if runtime.GOOS == "linux" {
-		log.Println("[AI 初始化] 开始下载并安装 Qdrant (deb)...")
-		// 下载 deb
-		qdrantDeb := "/tmp/qdrant.deb"
-		os.Remove(qdrantDeb)
-		if output, err := runAICommand(2*time.Minute, nil, "wget", "--inet4-only", "--timeout=30", "--tries=2", "--no-verbose", "https://github.com/qdrant/qdrant/releases/download/v1.18.2/qdrant_1.18.2-1_amd64.deb", "-O", qdrantDeb); err != nil {
-			log.Printf("[AI 初始化] 下载 Qdrant 失败: %v, output: %s", err, string(output))
+		// 仅在 qdrant 未安装时才下载安装，避免每次重启都重复下载
+		if _, err := exec.LookPath("qdrant"); err != nil {
+			log.Println("[AI 初始化] 开始下载并安装 Qdrant (deb)...")
+			qdrantDeb := "/tmp/qdrant.deb"
 			os.Remove(qdrantDeb)
-			return
-		}
-		if info, err := os.Stat(qdrantDeb); err != nil || info.Size() == 0 {
-			log.Printf("[AI 初始化] 下载 Qdrant 完成但安装包为空: %v", err)
+			if output, err := runAICommand(2*time.Minute, nil, "wget", "--inet4-only", "--timeout=30", "--tries=2", "--no-verbose", "https://github.com/qdrant/qdrant/releases/download/v1.18.2/qdrant_1.18.2-1_amd64.deb", "-O", qdrantDeb); err != nil {
+				log.Printf("[AI 初始化] 下载 Qdrant 失败: %v, output: %s", err, string(output))
+				os.Remove(qdrantDeb)
+				return
+			}
+			if info, err := os.Stat(qdrantDeb); err != nil || info.Size() == 0 {
+				log.Printf("[AI 初始化] 下载 Qdrant 完成但安装包为空: %v", err)
+				os.Remove(qdrantDeb)
+				return
+			}
+			if output, err := runAICommand(5*time.Minute, nil, "dpkg", "-i", qdrantDeb); err != nil {
+				log.Printf("[AI 初始化] 安装 Qdrant 失败: %v, output: %s", err, string(output))
+				return
+			}
 			os.Remove(qdrantDeb)
-			return
-		}
-		// dpkg 安装
-		if output, err := runAICommand(5*time.Minute, nil, "dpkg", "-i", qdrantDeb); err != nil {
-			log.Printf("[AI 初始化] 安装 Qdrant 失败: %v, output: %s", err, string(output))
-			return
-		}
-		os.Remove(qdrantDeb)
-		log.Println("[AI 初始化] Qdrant 安装成功！")
-
-		// 启动服务 (某些 deb 包可能没有 systemd，直接后台运行二进制文件)
-		qdrantCmd := exec.Command("/usr/bin/qdrant")
-		qdrantCmd.Dir = "/var/lib/qdrant" // Qdrant 需要一个工作目录
-		err = qdrantCmd.Start()
-		if err != nil {
-			log.Printf("[AI 初始化] 启动 Qdrant 失败: %v", err)
+			log.Println("[AI 初始化] Qdrant 安装成功！")
 		} else {
-			// 将进程丢弃让其在后台独立运行，或保留引用
-			go func() {
-				qdrantCmd.Wait()
-			}()
+			log.Println("[AI 初始化] Qdrant 已安装，跳过下载。")
+		}
+
+		// 优先通过 systemctl 启动（独立进程，不受 gnas 重启影响）
+		// qdrant.service 由 nfpm deb 包安装到 /lib/systemd/system/，
+		// 兼容之前手动创建的 /etc/systemd/system/qdrant.service
+		started := false
+		if hasQdrantServiceFile() {
+			if output, err := runAICommand(10*time.Second, nil, "systemctl", "start", "qdrant"); err != nil {
+				log.Printf("[AI 初始化] systemctl start qdrant 失败: %v, output: %s", err, string(output))
+			} else {
+				started = true
+				log.Println("[AI 初始化] 已通过 systemctl 启动 Qdrant。")
+			}
+		}
+
+		// fallback：没有 systemd service 时直接后台运行二进制
+		if !started {
+			qdrantCmd := exec.Command("/usr/bin/qdrant")
+			qdrantCmd.Dir = "/var/lib/qdrant" // Qdrant 需要一个工作目录
+			err = qdrantCmd.Start()
+			if err != nil {
+				log.Printf("[AI 初始化] 启动 Qdrant 失败: %v", err)
+			} else {
+				go func() {
+					qdrantCmd.Wait()
+				}()
+			}
 		}
 
 		// 等待启动

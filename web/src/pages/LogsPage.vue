@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted } from 'vue'
 import { apiGet, apiPost } from '@/composables/useApi'
 
 const logs = ref<string[]>([])
@@ -20,9 +20,16 @@ function logClass(log: string): string {
 }
 
 onMounted(async () => {
-  const data = await apiGet<string[]>('/api/logs')
-  logs.value = data || []
-  loading.value = false
+  loading.value = true
+  try {
+    const data = await apiGet<string[]>('/api/logs')
+    logs.value = data || []
+  } catch (e: unknown) {
+    console.error('加载日志失败:', e)
+    showMsg(e instanceof Error ? e.message : '加载日志失败')
+  } finally {
+    loading.value = false
+  }
 })
 
 async function clearLogs() {

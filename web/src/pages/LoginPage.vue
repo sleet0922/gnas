@@ -11,9 +11,13 @@ const error = ref('')
 const needSetup = ref(false)
 
 onMounted(async () => {
-  const data = await apiGet<{ needSetup: boolean }>('/api/login')
-  if (data) {
-    needSetup.value = data.needSetup
+  try {
+    const data = await apiGet<{ needSetup: boolean }>('/api/login')
+    if (data) {
+      needSetup.value = data.needSetup
+    }
+  } catch (e) {
+    console.error('检查登录状态失败:', e)
   }
 })
 

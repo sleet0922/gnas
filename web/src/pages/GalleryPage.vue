@@ -88,8 +88,12 @@ const isSearching = ref(false)
 const aiEnabled = ref(false)
 
 async function checkAISettings() {
-  const data = await apiGet<{ ai_enabled: boolean }>('/api/settings')
-  if (data) aiEnabled.value = data.ai_enabled
+  try {
+    const data = await apiGet<{ ai_enabled: boolean }>('/api/settings')
+    if (data) aiEnabled.value = data.ai_enabled
+  } catch (e) {
+    console.error('检查 AI 设置失败:', e)
+  }
 }
 
 async function handleSearch() {
@@ -130,12 +134,18 @@ watch(filter, () => {
 
 async function loadGallery() {
   loading.value = true
-  const data = await apiGet<MediaItem[]>('/api/gallery')
-  items.value = data || []
-  loading.value = false
-  selectMode.value = false
-  selectedPaths.value.clear()
-  nextTick(resetGalleryScroll)
+  try {
+    const data = await apiGet<MediaItem[]>('/api/gallery')
+    items.value = data || []
+    selectMode.value = false
+    selectedPaths.value.clear()
+    nextTick(resetGalleryScroll)
+  } catch (e: unknown) {
+    console.error('加载相册失败:', e)
+    alert(e instanceof Error ? e.message : '加载相册失败')
+  } finally {
+    loading.value = false
+  }
 }
 
 function exportGallery() {

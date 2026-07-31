@@ -54,9 +54,6 @@ func HandleGalleryExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", formatContentDisposition("attachment", "gnas-gallery-"+time.Now().Format("20060102-150405")+".zip"))
 	w.Header().Set("Cache-Control", "no-store")
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
 
 	started := time.Now()
 	log.Printf("[导出] 开始生成完整迁移 ZIP...")
@@ -112,11 +109,13 @@ func HandleGalleryExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func createGalleryExportTemp() (*os.File, error) {
-	// Production runs as root. Keep large archives off the small /tmp tmpfs;
-	// fall back to the OS temp directory for development and unprivileged tests.
-	tmp, err := os.CreateTemp("/root", ".gnas-gallery-*.zip")
-	if err == nil {
-		return tmp, nil
+	// 优先使用数据目录下的内部存储目录，避免占用小型 tmpfs；
+	// 开发或非特权环境下回退到系统临时目录。
+	exportDir := filepath.Join(dataDir, internalStorageDir)
+	if err := os.MkdirAll(exportDir, 0755); err == nil {
+		if tmp, err := os.CreateTemp(exportDir, ".gnas-gallery-*.zip"); err == nil {
+			return tmp, nil
+		}
 	}
 	return os.CreateTemp("", ".gnas-gallery-*.zip")
 }
@@ -125,10 +124,20 @@ func createGalleryExportTemp() (*os.File, error) {
 // crash or forced service restart. Completed and interrupted HTTP transfers
 // are removed by HandleGalleryExport itself.
 func CleanupGalleryExportTemps() {
-	matches, _ := filepath.Glob("/root/.gnas-gallery-*.zip")
-	for _, name := range matches {
-		if err := os.Remove(name); err == nil {
-			log.Printf("[导出] 已清理上次未完成的临时文件: %s", name)
+	// 清理数据目录内部存储中的残留
+	if matches, err := filepath.Glob(filepath.Join(dataDir, internalStorageDir, ".gnas-gallery-*.zip")); err == nil {
+		for _, name := range matches {
+			if err := os.Remove(name); err == nil {
+				log.Printf("[导出] 已清理上次未完成的临时文件: %s", name)
+			}
+		}
+	}
+	// 同时清理系统临时目录下的残留
+	if matches, err := filepath.Glob(filepath.Join(os.TempDir(), ".gnas-gallery-*.zip")); err == nil {
+		for _, name := range matches {
+			if err := os.Remove(name); err == nil {
+				log.Printf("[导出] 已清理上次未完成的临时文件: %s", name)
+			}
 		}
 	}
 }

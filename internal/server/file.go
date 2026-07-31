@@ -325,6 +325,7 @@ func HandleFileList(w http.ResponseWriter, r *http.Request) {
 
 // HandleFileUpload 上传文件
 func HandleFileUpload(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 500<<20) // 500MB
 	dir := r.URL.Query().Get("path")
 	if dir == "" {
 		dir = "/"
@@ -407,7 +408,7 @@ func mimeTypeByExt(name string) string {
 	case ".webp":
 		return "image/webp"
 	case ".svg":
-		return "image/svg+xml"
+		return "application/octet-stream"
 	case ".bmp":
 		return "image/bmp"
 	case ".heic", ".heif":
@@ -443,7 +444,7 @@ func mimeTypeByExt(name string) string {
 	case ".json":
 		return "application/json"
 	case ".html", ".htm":
-		return "text/html; charset=utf-8"
+		return "application/octet-stream"
 	case ".css":
 		return "text/css"
 	case ".js":
@@ -622,6 +623,7 @@ func generateVectorThumbnailUnbounded(srcPath string) (string, error) {
 		}
 		return "", fmt.Errorf("ffmpeg vector thumbnail produced no output: %w", err)
 	}
+	os.Remove(thumbPath)
 	if err := os.Rename(tmpPath, thumbPath); err != nil {
 		return "", err
 	}
@@ -713,13 +715,17 @@ func generateThumbnailUnbounded(srcPath string) (string, error) {
 	width := bounds.Dx()
 	if width <= 300 {
 		// 原图小于 300px，直接复制作为缩略图
-		f.Seek(0, 0)
+		if _, err := f.Seek(0, 0); err != nil {
+			return "", err
+		}
 		out, err := os.Create(thumbPath)
 		if err != nil {
 			return "", err
 		}
 		defer out.Close()
-		io.Copy(out, f)
+		if _, err := io.Copy(out, f); err != nil {
+			return "", err
+		}
 		return thumbPath, nil
 	}
 
@@ -798,6 +804,7 @@ func generateFFmpegImageThumbnail(srcPath, thumbPath string, reason error) (stri
 		}
 		return "", fmt.Errorf("ffmpeg thumbnail fallback produced no output (source: %v): %w", reason, err)
 	}
+	os.Remove(thumbPath)
 	if err := os.Rename(tmpPath, thumbPath); err != nil {
 		return "", err
 	}

@@ -33,6 +33,7 @@ func main() {
 	dataDir := filepath.Clean(dataPath)
 	os.MkdirAll(dataDir, 0755)
 	server.InitDataDir(dataDir)
+	server.Version = version
 	server.CleanupGalleryExportTemps()
 
 	// 检查并安装 ffmpeg
@@ -44,6 +45,9 @@ func main() {
 		log.Fatalf("初始化数据库失败: %v", err)
 	}
 	defer db.Close()
+
+	// 初始化 JWT 密钥（从 DB 加载或生成新密钥）
+	server.InitAuth()
 
 	// 检查并安装 AI 依赖 (Ollama, Qdrant)
 	server.CheckAndInstallAI()

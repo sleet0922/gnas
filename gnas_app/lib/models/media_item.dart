@@ -26,3 +26,23 @@ class MediaItem {
   bool get isImage => type == 'image';
   bool get isVideo => type == 'video';
 }
+
+class DuplicateGroup {
+  final double similarity;
+  final List<MediaItem> items;
+
+  DuplicateGroup({
+    required this.similarity,
+    required this.items,
+  });
+
+  factory DuplicateGroup.fromJson(Map<String, dynamic> json) {
+    final rawItems = json['items'] as List<dynamic>? ?? [];
+    return DuplicateGroup(
+      similarity: (json['similarity'] as num?)?.toDouble() ?? 0.0,
+      items: rawItems
+          .map((e) => MediaItem.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
+import '../models/media_item.dart';
 
 class DuplicatesPage extends StatefulWidget {
   const DuplicatesPage({super.key});
@@ -13,7 +14,7 @@ class _DuplicatesPageState extends State<DuplicatesPage>
   final _api = ApiService();
   bool _aiEnabled = false;
   bool _loading = true;
-  List<dynamic> _duplicateGroups = [];
+  List<DuplicateGroup> _duplicateGroups = [];
   String? _error;
 
   @override
@@ -63,9 +64,9 @@ class _DuplicatesPageState extends State<DuplicatesPage>
     }
   }
 
-  Future<void> _deleteItem(Map<String, dynamic> item, int groupIdx) async {
-    final name = item['name'] ?? '';
-    final path = item['path'] ?? '';
+  Future<void> _deleteItem(MediaItem item, int groupIdx) async {
+    final name = item.name;
+    final path = item.path;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -95,13 +96,16 @@ class _DuplicatesPageState extends State<DuplicatesPage>
     if (res.isSuccess) {
       setState(() {
         final group = _duplicateGroups[groupIdx];
-        final items = List<dynamic>.from(group['items']);
-        items.removeWhere((i) => i['path'] == path);
+        final items = List<MediaItem>.from(group.items);
+        items.removeWhere((i) => i.path == path);
 
         if (items.length < 2) {
           _duplicateGroups.removeAt(groupIdx);
         } else {
-          group['items'] = items;
+          _duplicateGroups[groupIdx] = DuplicateGroup(
+            similarity: group.similarity,
+            items: items,
+          );
         }
         _loading = false;
       });
@@ -251,8 +255,8 @@ class _DuplicatesPageState extends State<DuplicatesPage>
           itemCount: _duplicateGroups.length,
           itemBuilder: (context, idx) {
             final group = _duplicateGroups[idx];
-            final similarity = group['similarity'] as double? ?? 0.0;
-            final items = group['items'] as List<dynamic>? ?? [];
+            final similarity = group.similarity;
+            final items = group.items;
 
             return Card(
               margin: const EdgeInsets.only(bottom: 16),
@@ -301,9 +305,9 @@ class _DuplicatesPageState extends State<DuplicatesPage>
                         itemCount: items.length,
                         itemBuilder: (context, itemIdx) {
                           final item = items[itemIdx];
-                          final name = item['name'] ?? '';
-                          final path = item['path'] ?? '';
-                          final size = item['size'];
+                          final name = item.name;
+                          final path = item.path;
+                          final size = item.size;
 
                           return Container(
                             width: 120,
