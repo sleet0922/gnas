@@ -7,6 +7,14 @@ const loading = ref(true)
 const previewDialog = ref(false)
 const previewItem = ref<MediaItem | null>(null)
 const filter = ref<'all' | 'image' | 'video'>('all')
+const previewScale = ref(1)
+const previewOffset = reactive({ x: 0, y: 0 })
+const previewDragging = ref(false)
+const previewDragStart = reactive({ x: 0, y: 0 })
+const previewDragOffset = reactive({ x: 0, y: 0 })
+const previewViewport = ref<HTMLElement | null>(null)
+const previewNaturalSize = reactive({ width: 0, height: 0 })
+const previewViewportSize = reactive({ width: 0, height: 0 })
 
 // 批量选择
 const selectMode = ref(false)
@@ -67,6 +75,7 @@ const galleryBottomOffset = computed(() => Math.max(
 ))
 
 let galleryResizeObserver: ResizeObserver | null = null
+let previewResizeObserver: ResizeObserver | null = null
 
 function measureGalleryViewport() {
   if (!galleryViewport.value) return
@@ -197,25 +206,110 @@ function openPreview(item: MediaItem) {
     return
   }
   previewItem.value = item
+  resetPreviewTransform()
   previewDialog.value = true
 }
 
 function closePreview() {
   previewDialog.value = false
   previewItem.value = null
+  resetPreviewTransform()
 }
 
 function prevItem() {
   if (!previewItem.value) return
   const idx = filteredItems.value.findIndex(i => i.path === previewItem.value!.path)
-  if (idx > 0) previewItem.value = filteredItems.value[idx - 1]
+  if (idx > 0) {
+    previewItem.value = filteredItems.value[idx - 1]
+    resetPreviewTransform()
+  }
 }
 
 function nextItem() {
   if (!previewItem.value) return
   const idx = filteredItems.value.findIndex(i => i.path === previewItem.value!.path)
-  if (idx < filteredItems.value.length - 1) previewItem.value = filteredItems.value[idx + 1]
+  if (idx < filteredItems.value.length - 1) {
+    previewItem.value = filteredItems.value[idx + 1]
+    resetPreviewTransform()
+  }
 }
+
+function resetPreviewTransform() {
+  previewScale.value = 1
+  previewOffset.x = 0
+  previewOffset.y = 0
+  previewDragging.value = false
+  previewNaturalSize.width = 0
+  previewNaturalSize.height = 0
+}
+
+function measurePreviewViewport() {
+  if (!previewViewport.value) return
+  previewViewportSize.width = previewViewport.value.clientWidth
+  previewViewportSize.height = previewViewport.value.clientHeight
+}
+
+function onPreviewImageLoad(event: Event) {
+  const image = event.currentTarget as HTMLImageElement
+  previewNaturalSize.width = image.naturalWidth
+  previewNaturalSize.height = image.naturalHeight
+  measurePreviewViewport()
+  previewResizeObserver?.disconnect()
+  if (previewViewport.value) {
+    previewResizeObserver = new ResizeObserver(measurePreviewViewport)
+    previewResizeObserver.observe(previewViewport.value)
+  }
+}
+
+const previewBaseScale = computed(() => {
+  if (!previewNaturalSize.width || !previewNaturalSize.height || !previewViewportSize.width || !previewViewportSize.height) return 1
+  return Math.min(
+    1,
+    previewViewportSize.width / previewNaturalSize.width,
+    previewViewportSize.height / previewNaturalSize.height,
+  )
+})
+
+// Allow inspecting narrow long screenshots beyond native pixels while keeping a sane upper bound.
+const previewMaxScale = computed(() => Math.max(20, 1 / previewBaseScale.value))
+
+function onPreviewWheel(event: WheelEvent) {
+  if (previewItem.value?.type !== 'image') return
+  const scaleStep = event.deltaY < 0 ? 1.15 : 1 / 1.15
+  previewScale.value = Math.min(previewMaxScale.value, Math.max(1, previewScale.value * scaleStep))
+  if (previewScale.value === 1) {
+    previewOffset.x = 0
+    previewOffset.y = 0
+  }
+}
+
+function onPreviewPointerDown(event: PointerEvent) {
+  if (previewItem.value?.type !== 'image' || event.button !== 0 || previewScale.value <= 1) return
+  const target = event.currentTarget as HTMLElement
+  target.setPointerCapture(event.pointerId)
+  previewDragging.value = true
+  previewDragStart.x = event.clientX
+  previewDragStart.y = event.clientY
+  previewDragOffset.x = previewOffset.x
+  previewDragOffset.y = previewOffset.y
+}
+
+function onPreviewPointerMove(event: PointerEvent) {
+  if (!previewDragging.value) return
+  previewOffset.x = previewDragOffset.x + event.clientX - previewDragStart.x
+  previewOffset.y = previewDragOffset.y + event.clientY - previewDragStart.y
+}
+
+function onPreviewPointerUp() {
+  previewDragging.value = false
+}
+
+const previewImageStyle = computed(() => ({
+  visibility: previewNaturalSize.width ? ('visible' as const) : ('hidden' as const),
+  width: `${Math.round(previewNaturalSize.width * previewBaseScale.value * previewScale.value)}px`,
+  height: `${Math.round(previewNaturalSize.height * previewBaseScale.value * previewScale.value)}px`,
+  transform: `translate(-50%, -50%) translate(${previewOffset.x}px, ${previewOffset.y}px)`,
+}))
 
 function onKeydown(e: KeyboardEvent) {
   if (!previewDialog.value) return
@@ -347,6 +441,8 @@ onMounted(() => {
 onUnmounted(() => {
   galleryResizeObserver?.disconnect()
   galleryResizeObserver = null
+  previewResizeObserver?.disconnect()
+  previewResizeObserver = null
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('click', closeContextMenu)
   window.removeEventListener('scroll', closeContextMenu, true)
@@ -512,11 +608,24 @@ onUnmounted(() => {
             <v-icon color="white">mdi-close</v-icon>
           </v-btn>
         </v-toolbar>
-        <v-card-text class="d-flex justify-center align-center" style="height: calc(100vh - 48px);">
+        <v-card-text class="pa-0">
+          <div
+            ref="previewViewport"
+            class="preview-image-viewport"
+          @wheel.prevent="onPreviewWheel"
+          @pointerdown="onPreviewPointerDown"
+          @pointermove="onPreviewPointerMove"
+          @pointerup="onPreviewPointerUp"
+          @pointercancel="onPreviewPointerUp"
+          >
           <img
             v-if="previewItem?.type === 'image'"
             :src="originalUrl(previewItem)"
-            style="max-width: 100%; max-height: 100%; object-fit: contain;"
+            class="preview-image"
+            :class="{ 'preview-image-dragging': previewDragging }"
+            :style="previewImageStyle"
+            draggable="false"
+            @load="onPreviewImageLoad"
           />
           <video
             v-else-if="previewItem?.type === 'video'"
@@ -525,6 +634,7 @@ onUnmounted(() => {
             autoplay
             style="max-width: 100%; max-height: 100%;"
           />
+          </div>
         </v-card-text>
       </v-card>
     </v-dialog>
@@ -651,5 +761,30 @@ onUnmounted(() => {
   border-radius: 8px;
   background: rgb(var(--v-theme-surface));
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.preview-image-viewport {
+  height: calc(100vh - 48px);
+  overflow: hidden;
+  touch-action: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-image {
+  object-fit: contain;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  cursor: grab;
+  user-select: none;
+  transition: width 0.12s ease-out, height 0.12s ease-out;
+}
+
+.preview-image-dragging {
+  cursor: grabbing;
+  transition: none;
 }
 </style>

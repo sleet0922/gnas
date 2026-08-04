@@ -343,6 +343,7 @@ func generateImageEmbedding(absPath string) {
 					"path":          absPath,
 					"name":          filename,
 					"vector_source": "thumbnail",
+					"recycled":      false,
 				},
 			},
 		},
@@ -373,6 +374,7 @@ type qdrantPathPoint struct {
 	Vector  []float32 `json:"vector,omitempty"`
 	Payload struct {
 		Path         string `json:"path"`
+		Recycled     bool   `json:"recycled"`
 		VectorSource string `json:"vector_source"`
 	} `json:"payload"`
 }
@@ -466,7 +468,7 @@ func getQdrantIndexedPaths() (map[string]struct{}, error) {
 			return nil, err
 		}
 		for _, point := range result.Result.Points {
-			if point.Payload.Path != "" && point.Payload.VectorSource == "thumbnail" {
+			if point.Payload.Path != "" && point.Payload.VectorSource == "thumbnail" && !point.Payload.Recycled {
 				indexed[filepath.Clean(point.Payload.Path)] = struct{}{}
 			}
 		}
@@ -499,6 +501,132 @@ func deleteQdrantPointIDs(ids []string) error {
 		return fmt.Errorf("Qdrant returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 	return nil
+}
+
+func updateQdrantPointPayload(ids []string, payload map[string]interface{}) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"payload": payload,
+		"points":  ids,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/collections/%s/points/payload?wait=true", qdrantURL, collection), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Qdrant payload update returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	return nil
+}
+
+func updateQdrantVectorsForRecycle(absPath string, recursive bool) error {
+	points, err := qdrantPointsForPath(absPath, recursive)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(points))
+	for _, point := range points {
+		if point.ID != "" {
+			ids = append(ids, point.ID)
+		}
+	}
+	return updateQdrantPointPayload(ids, map[string]interface{}{"recycled": true})
+}
+
+func restoreQdrantVectors(oldPath, newPath string, recursive bool) (int, error) {
+	points, err := qdrantPointsForPath(oldPath, recursive)
+	if err != nil {
+		return 0, err
+	}
+	byPath := make(map[string][]string)
+	target := filepath.Clean(oldPath)
+	for _, point := range points {
+		if point.ID == "" {
+			continue
+		}
+		updatedPath := filepath.Clean(newPath)
+		if recursive {
+			relative := strings.TrimPrefix(filepath.Clean(point.Payload.Path), target)
+			updatedPath = filepath.Join(updatedPath, relative)
+		}
+		byPath[updatedPath] = append(byPath[updatedPath], point.ID)
+	}
+	for path, ids := range byPath {
+		if err := updateQdrantPointPayload(ids, map[string]interface{}{
+			"path":     path,
+			"name":     filepath.Base(path),
+			"recycled": false,
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return len(points), nil
+}
+
+func qdrantPointsForPath(absPath string, recursive bool) ([]qdrantPathPoint, error) {
+	target := filepath.Clean(absPath)
+	var points []qdrantPathPoint
+	var offset json.RawMessage
+	for {
+		payload := map[string]interface{}{
+			"limit":        256,
+			"with_vector":  false,
+			"with_payload": true,
+		}
+		if len(offset) > 0 && string(offset) != "null" {
+			payload["offset"] = offset
+		}
+		body, _ := json.Marshal(payload)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post(fmt.Sprintf("%s/collections/%s/points/scroll", qdrantURL, collection), "application/json", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode >= 300 {
+			responseBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("Qdrant scroll returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+		}
+		var result struct {
+			Result struct {
+				Points         []qdrantPathPoint `json:"points"`
+				NextPageOffset json.RawMessage   `json:"next_page_offset"`
+			} `json:"result"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, point := range result.Result.Points {
+			pointPath := filepath.Clean(point.Payload.Path)
+			matches := pointPath == target
+			if recursive {
+				matches = matches || strings.HasPrefix(pointPath, target+string(filepath.Separator))
+			}
+			if matches {
+				points = append(points, point)
+			}
+		}
+		if len(result.Result.NextPageOffset) == 0 || string(result.Result.NextPageOffset) == "null" || len(result.Result.Points) == 0 {
+			break
+		}
+		offset = result.Result.NextPageOffset
+	}
+	return points, nil
 }
 
 func deleteQdrantVectorsForPath(absPath string, recursive bool) {
@@ -560,8 +688,9 @@ func HandleSearchPhotos(w http.ResponseWriter, r *http.Request) {
 		Result []struct {
 			Score   float32 `json:"score"`
 			Payload struct {
-				Path string `json:"path"`
-				Name string `json:"name"`
+				Path     string `json:"path"`
+				Name     string `json:"name"`
+				Recycled bool   `json:"recycled"`
 			} `json:"payload"`
 		} `json:"result"`
 	}
@@ -574,6 +703,9 @@ func HandleSearchPhotos(w http.ResponseWriter, r *http.Request) {
 	// 提取结果并返回
 	var searchItems []MediaItem
 	for _, res := range result.Result {
+		if res.Payload.Recycled {
+			continue
+		}
 		absPath := res.Payload.Path
 		info, err := os.Stat(absPath)
 		if err != nil {
@@ -605,8 +737,9 @@ type qdrantPoint struct {
 	ID      string    `json:"id"`
 	Vector  []float32 `json:"vector"`
 	Payload struct {
-		Path string `json:"path"`
-		Name string `json:"name"`
+		Path     string `json:"path"`
+		Name     string `json:"name"`
+		Recycled bool   `json:"recycled"`
 	} `json:"payload"`
 }
 
@@ -653,8 +786,9 @@ func getAllQdrantPoints() ([]qdrantPoint, error) {
 }
 
 type qdrantPointMetadata struct {
-	ID   string
-	Path string
+	ID       string
+	Path     string
+	Recycled bool
 }
 
 func getQdrantPointMetadata() ([]qdrantPointMetadata, error) {
@@ -692,8 +826,8 @@ func getQdrantPointMetadata() ([]qdrantPointMetadata, error) {
 			return nil, err
 		}
 		for _, point := range result.Result.Points {
-			if point.ID != "" && point.Payload.Path != "" {
-				points = append(points, qdrantPointMetadata{ID: point.ID, Path: filepath.Clean(point.Payload.Path)})
+			if point.ID != "" && point.Payload.Path != "" && !point.Payload.Recycled {
+				points = append(points, qdrantPointMetadata{ID: point.ID, Path: filepath.Clean(point.Payload.Path), Recycled: point.Payload.Recycled})
 			}
 		}
 		if len(result.Result.NextPageOffset) == 0 || string(result.Result.NextPageOffset) == "null" || len(result.Result.Points) == 0 {
@@ -714,8 +848,10 @@ func CleanupStaleQdrantVectors() {
 	}
 	stale := make([]string, 0)
 	for _, point := range points {
-		if _, err := os.Stat(point.Path); os.IsNotExist(err) && point.ID != "" {
-			stale = append(stale, point.ID)
+		if !point.Recycled {
+			if _, err := os.Stat(point.Path); os.IsNotExist(err) && point.ID != "" {
+				stale = append(stale, point.ID)
+			}
 		}
 	}
 	for start := 0; start < len(stale); start += 256 {
@@ -730,7 +866,7 @@ func CleanupStaleQdrantVectors() {
 	}
 }
 
-const duplicateCacheKey = "image_similarity_v2"
+const duplicateCacheKey = "image_similarity_v3"
 
 func duplicateSignature(points []qdrantPointMetadata) string {
 	sort.Slice(points, func(i, j int) bool {
@@ -955,7 +1091,7 @@ func handleGalleryDuplicatesLegacy(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, groups)
 }
 
-const duplicateSimilarityThreshold float32 = 0.70
+const duplicateSimilarityThreshold float32 = 0.20
 
 type duplicatePair struct {
 	a, b  string
@@ -972,8 +1108,14 @@ func queryNearestDuplicates(client *http.Client, vector []float32) ([]qdrantNear
 		"query":           vector,
 		"limit":           128,
 		"score_threshold": duplicateSimilarityThreshold,
-		"with_payload":    false,
-		"with_vector":     false,
+		"filter": map[string]interface{}{
+			"must_not": []map[string]interface{}{{
+				"key":   "recycled",
+				"match": map[string]interface{}{"value": true},
+			}},
+		},
+		"with_payload": false,
+		"with_vector":  false,
 	})
 	if err != nil {
 		return nil, err
@@ -1002,7 +1144,7 @@ func calculateDuplicateGroups(points []qdrantPoint) ([]DuplicateGroup, error) {
 	valid := make([]qdrantPoint, 0, len(points))
 	byID := make(map[string]int, len(points))
 	for _, point := range points {
-		if point.ID == "" || len(point.Vector) != embeddingDimension || !isImageExt(point.Payload.Path) {
+		if point.ID == "" || point.Payload.Recycled || len(point.Vector) != embeddingDimension || !isImageExt(point.Payload.Path) {
 			continue
 		}
 		if _, err := os.Stat(point.Payload.Path); err != nil {
@@ -1255,7 +1397,7 @@ func WarmDuplicateCache() {
 	log.Printf("[查重] 缓存预热完成，阈值 %.0f%%，得到 %d 个分组，耗时 %s", duplicateSimilarityThreshold*100, len(groups), time.Since(started).Round(time.Millisecond))
 }
 
-// HandleGalleryDuplicates returns cached 70%+ groups when the indexed media
+// HandleGalleryDuplicates returns cached 20%+ groups when the indexed media
 // set is unchanged, and otherwise uses Qdrant nearest-neighbor queries instead
 // of an O(n^2) all-pairs vector scan.
 func HandleGalleryDuplicates(w http.ResponseWriter, r *http.Request) {

@@ -81,6 +81,15 @@ const previewDialog = ref(false)
 const previewUrl = ref('')
 const previewType = ref<'image' | 'video' | 'audio' | 'pdf' | 'text' | 'unknown'>('unknown')
 const previewName = ref('')
+const previewScale = ref(1)
+const previewOffset = reactive({ x: 0, y: 0 })
+const previewDragging = ref(false)
+const previewDragStart = reactive({ x: 0, y: 0 })
+const previewDragOffset = reactive({ x: 0, y: 0 })
+const previewViewport = ref<HTMLElement | null>(null)
+const previewNaturalSize = reactive({ width: 0, height: 0 })
+const previewViewportSize = reactive({ width: 0, height: 0 })
+let previewResizeObserver: ResizeObserver | null = null
 
 const contextMenu = reactive({
   visible: false,
@@ -138,8 +147,91 @@ function openPreview(item: FileItem) {
   previewType.value = type
   previewName.value = item.name
   previewUrl.value = getAuthDownloadUrl(item.path, true)
+  resetPreviewTransform()
   previewDialog.value = true
 }
+
+function closePreview() {
+  previewDialog.value = false
+  resetPreviewTransform()
+}
+
+function resetPreviewTransform() {
+  previewScale.value = 1
+  previewOffset.x = 0
+  previewOffset.y = 0
+  previewDragging.value = false
+  previewNaturalSize.width = 0
+  previewNaturalSize.height = 0
+}
+
+function measurePreviewViewport() {
+  if (!previewViewport.value) return
+  previewViewportSize.width = previewViewport.value.clientWidth
+  previewViewportSize.height = previewViewport.value.clientHeight
+}
+
+function onPreviewImageLoad(event: Event) {
+  const image = event.currentTarget as HTMLImageElement
+  previewNaturalSize.width = image.naturalWidth
+  previewNaturalSize.height = image.naturalHeight
+  measurePreviewViewport()
+  previewResizeObserver?.disconnect()
+  if (previewViewport.value) {
+    previewResizeObserver = new ResizeObserver(measurePreviewViewport)
+    previewResizeObserver.observe(previewViewport.value)
+  }
+}
+
+const previewBaseScale = computed(() => {
+  if (!previewNaturalSize.width || !previewNaturalSize.height || !previewViewportSize.width || !previewViewportSize.height) return 1
+  return Math.min(
+    1,
+    previewViewportSize.width / previewNaturalSize.width,
+    previewViewportSize.height / previewNaturalSize.height,
+  )
+})
+
+// Allow inspecting narrow long screenshots beyond native pixels while keeping a sane upper bound.
+const previewMaxScale = computed(() => Math.max(20, 1 / previewBaseScale.value))
+
+function onPreviewWheel(event: WheelEvent) {
+  if (previewType.value !== 'image') return
+  const scaleStep = event.deltaY < 0 ? 1.15 : 1 / 1.15
+  previewScale.value = Math.min(previewMaxScale.value, Math.max(1, previewScale.value * scaleStep))
+  if (previewScale.value === 1) {
+    previewOffset.x = 0
+    previewOffset.y = 0
+  }
+}
+
+function onPreviewPointerDown(event: PointerEvent) {
+  if (previewType.value !== 'image' || event.button !== 0 || previewScale.value <= 1) return
+  const target = event.currentTarget as HTMLElement
+  target.setPointerCapture(event.pointerId)
+  previewDragging.value = true
+  previewDragStart.x = event.clientX
+  previewDragStart.y = event.clientY
+  previewDragOffset.x = previewOffset.x
+  previewDragOffset.y = previewOffset.y
+}
+
+function onPreviewPointerMove(event: PointerEvent) {
+  if (!previewDragging.value) return
+  previewOffset.x = previewDragOffset.x + event.clientX - previewDragStart.x
+  previewOffset.y = previewDragOffset.y + event.clientY - previewDragStart.y
+}
+
+function onPreviewPointerUp() {
+  previewDragging.value = false
+}
+
+const previewImageStyle = computed(() => ({
+  visibility: previewNaturalSize.width ? ('visible' as const) : ('hidden' as const),
+  width: `${Math.round(previewNaturalSize.width * previewBaseScale.value * previewScale.value)}px`,
+  height: `${Math.round(previewNaturalSize.height * previewBaseScale.value * previewScale.value)}px`,
+  transform: `translate(-50%, -50%) translate(${previewOffset.x}px, ${previewOffset.y}px)`,
+}))
 
 async function loadFiles(dir?: string, preserveScroll = false) {
   const previousScrollTop = fileViewport.value?.scrollTop ?? fileScrollTop.value
@@ -375,6 +467,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  previewResizeObserver?.disconnect()
+  previewResizeObserver = null
   fileResizeObserver?.disconnect()
   fileResizeObserver = null
   window.removeEventListener('click', closeContextMenu)
@@ -534,18 +628,36 @@ onUnmounted(() => {
         <v-card-title class="d-flex align-center">
           <span class="text-subtitle-1 font-weight-medium">{{ previewName }}</span>
           <v-spacer />
-          <v-btn icon size="small" variant="text" @click="previewDialog = false">
+          <v-btn icon size="small" variant="text" @click="closePreview">
             <v-icon>mdi-close</v-icon>
           </v-btn>
         </v-card-title>
         <v-divider />
-        <v-card-text class="pa-0 d-flex justify-center align-center" style="min-height: 300px; background: #000;">
-          <img v-if="previewType === 'image'" :src="previewUrl" style="max-width: 100%; max-height: 70vh; object-fit: contain;" />
+        <v-card-text class="pa-0">
+          <div
+            ref="previewViewport"
+            class="file-preview-image-viewport"
+          @wheel.prevent="onPreviewWheel"
+          @pointerdown="onPreviewPointerDown"
+          @pointermove="onPreviewPointerMove"
+          @pointerup="onPreviewPointerUp"
+          @pointercancel="onPreviewPointerUp"
+          >
+          <img
+            v-if="previewType === 'image'"
+            :src="previewUrl"
+            class="file-preview-image"
+            :class="{ 'file-preview-image-dragging': previewDragging }"
+            :style="previewImageStyle"
+            draggable="false"
+            @load="onPreviewImageLoad"
+          />
           <video v-else-if="previewType === 'video'" :src="previewUrl" controls style="max-width: 100%; max-height: 70vh;" />
           <audio v-else-if="previewType === 'audio'" :src="previewUrl" controls class="pa-8" />
           <iframe v-else-if="previewType === 'pdf'" :src="previewUrl" style="width: 100%; height: 70vh; border: none;" />
           <iframe v-else-if="previewType === 'text'" :src="previewUrl" style="width: 100%; height: 70vh; border: none; background: #fff;" />
           <div v-else class="text-medium-emphasis pa-8">不支持预览此文件类型</div>
+          </div>
         </v-card-text>
       </v-card>
     </v-dialog>
@@ -620,6 +732,34 @@ onUnmounted(() => {
   height: 68px;
   min-height: 68px;
   contain: layout paint;
+}
+
+.file-preview-image-viewport {
+  height: 70vh;
+  min-height: 300px;
+  max-height: 70vh;
+  overflow: hidden;
+  background: #000;
+  touch-action: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-preview-image {
+  object-fit: contain;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  cursor: grab;
+  user-select: none;
+  transition: width 0.12s ease-out, height 0.12s ease-out;
+}
+
+.file-preview-image-dragging {
+  cursor: grabbing;
+  transition: none;
 }
 
 .web-context-menu {

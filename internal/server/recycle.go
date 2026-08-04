@@ -73,14 +73,12 @@ func moveToRecycleBin(absPath string) (*db.RecycleItem, error) {
 	}
 
 	// 删除向量（恢复时重新生成）
-	deleteQdrantVectorsForPath(absPath, isDir)
+	if err := updateQdrantVectorsForRecycle(absPath, isDir); err != nil {
+		log.Printf("[recycle] mark vectors failed %s: %v", absPath, err)
+	}
 	markDeletedEmbeddingPath(absPath)
 
 	// 清理向量缩略图（向量缩略图不保留，恢复时重新生成）
-	if !isDir && isImageExt(absPath) {
-		os.Remove(getVectorThumbCachePath(absPath))
-	}
-
 	// 清理文件元数据
 	db.DeleteFileMeta(absPath)
 
@@ -149,10 +147,15 @@ func restoreFromRecycleBin(id int64) error {
 	}
 
 	// 删除回收站记录
+	clearDeletedEmbeddingPath(item.OriginalPath)
+	indexed, vectorErr := restoreQdrantVectors(item.OriginalPath, destPath, item.IsDir)
+	if vectorErr != nil {
+		log.Printf("[recycle] restore vectors failed %s -> %s: %v", item.OriginalPath, destPath, vectorErr)
+	}
+
 	db.DeleteRecycleItem(id)
 
-	// 异步重新生成向量
-	if !item.IsDir && isImageExt(destPath) {
+	if vectorErr != nil || indexed == 0 {
 		EnqueueMissingImageEmbeddings()
 	}
 
@@ -168,6 +171,7 @@ func purgeFromRecycleBin(id int64) error {
 	if item == nil {
 		return fmt.Errorf("回收站记录不存在")
 	}
+	deleteQdrantVectorsForPath(item.OriginalPath, item.IsDir)
 
 	// 删除回收站中的文件
 	os.RemoveAll(item.StoredPath)
@@ -187,6 +191,7 @@ func clearRecycleBin() (int, error) {
 	}
 	count := 0
 	for _, item := range items {
+		deleteQdrantVectorsForPath(item.OriginalPath, item.IsDir)
 		os.RemoveAll(item.StoredPath)
 		if item.ThumbStoredPath != "" {
 			os.Remove(item.ThumbStoredPath)
@@ -206,6 +211,7 @@ func cleanupExpiredRecycleItems() int {
 	}
 	count := 0
 	for _, item := range items {
+		deleteQdrantVectorsForPath(item.OriginalPath, item.IsDir)
 		os.RemoveAll(item.StoredPath)
 		if item.ThumbStoredPath != "" {
 			os.Remove(item.ThumbStoredPath)
