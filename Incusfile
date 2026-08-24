@@ -1,0 +1,41 @@
+version: 2
+args: {GO_VERSION: "1.25.0", QDRANT_VERSION: "1.18.2"}
+mirror: china
+name: gnas
+network: nat
+stages:
+  - name: builder
+    from: debian/13
+    workdir: /src
+    env: {CGO_ENABLED: "0", GOPROXY: "https://goproxy.cn,direct", GOSUMDB: "sum.golang.google.cn"}
+    packages: [ca-certificates, nodejs, npm, wget]
+    tools: {go: "${GO_VERSION}"}
+    files: {/src/: [go.mod, go.sum, main.go], /src/internal/: [internal], /src/web/: [web]}
+    fetch:
+      - url: "https://github.com/qdrant/qdrant/releases/download/v${QDRANT_VERSION}/qdrant-x86_64-unknown-linux-gnu.tar.gz"
+        extract: /out
+        format: tar.gz
+        timeout: 120
+        tries: 3
+    commands:
+      - [mkdir, -p, /out]
+      - shell: |
+          set -eu
+          cd /src/web
+          npm config set registry https://registry.npmmirror.com
+          npm ci
+          npm run build
+      - [go, mod, download]
+      - [go, build, -trimpath, "-ldflags=-s -w", -o, /out/gnas, .]
+      - [chmod, "0755", /out/gnas, /out/qdrant]
+  - from: debian/13
+    packages: [ca-certificates, ffmpeg, libgomp1, procps, python3, python3-pip, python3-venv, wget]
+    artifacts: {builder: {/out/gnas: /usr/local/bin/gnas, /out/qdrant: /usr/bin/qdrant}}
+    commands:
+      - [mkdir, -p, /var/lib/gnas, /var/lib/qdrant]
+      - [chmod, "0755", /usr/local/bin/gnas, /usr/bin/qdrant]
+    runtime:
+      entrypoint: [/usr/local/bin/gnas]
+      expose: [8082]
+      domain: gnas.test
+      autostart: true
