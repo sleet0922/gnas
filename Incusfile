@@ -1,5 +1,5 @@
 version: 2
-args: {GO_VERSION: "1.25.0", QDRANT_VERSION: "1.18.2"}
+args: {GO_VERSION: "1.25.0"}
 mirror: china
 name: gnas
 network: nat
@@ -12,7 +12,7 @@ stages:
     tools: {go: "${GO_VERSION}"}
     files: {/src/: [go.mod, go.sum, main.go], /src/internal/: [internal], /src/web/: [web]}
     fetch:
-      - url: "https://github.com/qdrant/qdrant/releases/download/v${QDRANT_VERSION}/qdrant-x86_64-unknown-linux-gnu.tar.gz"
+      - url: "https://gitee.com/sleet0922/cloud_disk/releases/download/v1.0/qdrant-x86_64-unknown-linux-gnu.tar.gz"
         extract: /out
         format: tar.gz
         timeout: 120
