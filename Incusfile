@@ -4,10 +4,10 @@ name: gnas
 network: nat
 stages:
   - name: builder
-    from: alpine:3.24
+    from: debian:13
     workdir: /src
     env: {CGO_ENABLED: "0", GOPROXY: "https://goproxy.cn,direct", GOSUMDB: "sum.golang.google.cn"}
-    packages: [ca-certificates, nodejs, npm, wget, go]
+    packages: [ca-certificates, nodejs, npm, wget, golang-go]
     files: {/src/: [go.mod, go.sum, main.go], /src/internal/: [internal], /src/web/: [web]}
     fetch:
       - url: "https://gitee.com/sleet0922/cloud_disk/releases/download/v1.0/qdrant-x86_64-unknown-linux-musl.tar.gz"
@@ -26,8 +26,8 @@ stages:
       - [go, mod, download]
       - [go, build, -trimpath, "-ldflags=-s -w", -o, /out/gnas, .]
       - [chmod, "0755", /out/gnas, /out/qdrant]
-  - from: alpine:3.24
-    packages: [ca-certificates, ffmpeg, libgomp, procps, python3, py3-pip, python3-dev, wget]
+  - from: debian:13
+    packages: [ca-certificates, ffmpeg, libgomp1, procps, python3, python3-pip, python3-venv, wget]
     artifacts: {builder: {/out/gnas: /usr/local/bin/gnas, /out/qdrant: /usr/bin/qdrant}}
     commands:
       - [mkdir, -p, /var/lib/gnas, /var/lib/qdrant]

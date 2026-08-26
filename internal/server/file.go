@@ -1111,7 +1111,7 @@ func HandleFileRename(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, nil)
 }
 
-// CheckAndInstallFFmpeg 检查 ffmpeg 是否存在，若不存在且在 linux 下且有 apt-get 则自动安装
+// CheckAndInstallFFmpeg 检查 ffmpeg 是否存在，按系统选择 apt-get 或 apk 自动安装。
 func CheckAndInstallFFmpeg() {
 	_, err := exec.LookPath("ffmpeg")
 	if err == nil {
@@ -1120,33 +1120,37 @@ func CheckAndInstallFFmpeg() {
 	}
 
 	if runtime.GOOS != "linux" {
-		log.Printf("ffmpeg 未找到，但当前系统为 %s，无法自动执行 apt 安装", runtime.GOOS)
+		log.Printf("ffmpeg 未找到，但当前系统为 %s，无法自动安装", runtime.GOOS)
 		return
 	}
 
-	aptPath, err := exec.LookPath("apt-get")
-	if err != nil {
-		log.Println("ffmpeg 未找到，且未检测到 apt-get，无法自动安装")
+	packageManager := ""
+	packageArgs := []string{}
+	if path, err := exec.LookPath("apt-get"); err == nil {
+		packageManager = path
+		packageArgs = []string{"install", "-y", "ffmpeg"}
+	} else if path, err := exec.LookPath("apk"); err == nil {
+		packageManager = path
+		packageArgs = []string{"add", "--no-cache", "ffmpeg"}
+	}
+	if packageManager == "" {
+		log.Println("ffmpeg 未找到，且未检测到 apt-get 或 apk，无法自动安装")
 		return
 	}
 
-	log.Println("检测到 ffmpeg 不存在，正在自动通过 apt 安装 ffmpeg...")
+	log.Printf("检测到 ffmpeg 不存在，正在通过 %s 自动安装 ffmpeg...", filepath.Base(packageManager))
 	go func() {
-		// 执行 apt-get update
-		log.Println("[APT] 正在执行 apt-get update...")
-		updateCmd := exec.Command(aptPath, "update")
+		updateCmd := exec.Command(packageManager, "update")
 		if output, err := updateCmd.CombinedOutput(); err != nil {
-			log.Printf("[APT] apt-get update 失败: %v, output: %s", err, string(output))
+			log.Printf("[%s] update 失败: %v, output: %s", filepath.Base(packageManager), err, string(output))
 			return
 		}
 
-		// 执行 apt-get install -y ffmpeg
-		log.Println("[APT] 正在执行 apt-get install -y ffmpeg...")
-		installCmd := exec.Command(aptPath, "install", "-y", "ffmpeg")
+		installCmd := exec.Command(packageManager, packageArgs...)
 		if output, err := installCmd.CombinedOutput(); err != nil {
-			log.Printf("[APT] apt-get install ffmpeg 失败: %v, output: %s", err, string(output))
+			log.Printf("[%s] install ffmpeg 失败: %v, output: %s", filepath.Base(packageManager), err, string(output))
 			return
 		}
-		log.Println("[APT] ffmpeg 自动安装成功！")
+		log.Printf("[%s] ffmpeg 自动安装成功！", filepath.Base(packageManager))
 	}()
 }

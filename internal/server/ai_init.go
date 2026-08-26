@@ -184,14 +184,18 @@ func checkAndInstallPythonVLM() {
 
 	log.Println("[AI 初始化] 准备配置 Python 虚拟环境与多模态向量模型...")
 
-	// 1. 安装系统级 python 依赖
-	aptEnv := append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-	if output, err := runAICommand(5*time.Minute, aptEnv, "apt-get", "update", "-o", "Acquire::Retries=3"); err != nil {
-		log.Printf("[AI 初始化] apt update 失败: %v, output: %s", err, string(output))
+	// 1. 安装系统级 Python 依赖。Debian/Ubuntu 使用 apt，Alpine 使用 apk.
+	manager, err := detectAIPackageManager()
+	if err != nil {
+		log.Printf("[AI 初始化] 未找到可用的系统包管理器（需要 apt-get 或 apk）: %v", err)
 		return
 	}
-	if output, err := runAICommand(5*time.Minute, aptEnv, "apt-get", "install", "-y", "python3-venv", "python3-pip", "python3"); err != nil {
-		log.Printf("[AI 初始化] apt install 失败: %v, output: %s", err, string(output))
+	if output, err := runAICommand(5*time.Minute, manager.env, manager.binary, manager.updateArgs...); err != nil {
+		log.Printf("[AI 初始化] %s update 失败: %v, output: %s", manager.name, err, string(output))
+		return
+	}
+	if output, err := runAICommand(5*time.Minute, manager.env, manager.binary, append(manager.installArgs, "python3")...); err != nil {
+		log.Printf("[AI 初始化] %s install 失败: %v, output: %s", manager.name, err, string(output))
 		return
 	}
 	if _, err := exec.LookPath("python3"); err != nil {
@@ -210,7 +214,7 @@ func checkAndInstallPythonVLM() {
 			return
 		}
 		log.Println("[AI 初始化] 正在创建 Python 虚拟环境...")
-		if output, err := runAICommand(5*time.Minute, aptEnv, "python3", "-m", "venv", envDir); err != nil {
+		if output, err := runAICommand(5*time.Minute, manager.env, "python3", "-m", "venv", envDir); err != nil {
 			log.Printf("[AI 初始化] 创建虚拟环境失败: %v, output: %s", err, string(output))
 			return
 		}
@@ -305,6 +309,36 @@ func checkAndInstallPythonVLM() {
 	} else {
 		log.Println("[AI 初始化] 警告：多模态向量服务未能按时响应，请检查数据目录下的 embed_server.log 日志。")
 	}
+}
+
+type aiPackageManager struct {
+	name        string
+	binary      string
+	env         []string
+	updateArgs  []string
+	installArgs []string
+}
+
+func detectAIPackageManager() (aiPackageManager, error) {
+	if path, err := exec.LookPath("apt-get"); err == nil {
+		return aiPackageManager{
+			name:        "apt",
+			binary:      path,
+			env:         append(os.Environ(), "DEBIAN_FRONTEND=noninteractive"),
+			updateArgs:  []string{"update", "-o", "Acquire::Retries=3"},
+			installArgs: []string{"install", "-y", "python3-venv", "python3-pip"},
+		}, nil
+	}
+	if path, err := exec.LookPath("apk"); err == nil {
+		return aiPackageManager{
+			name:        "apk",
+			binary:      path,
+			env:         os.Environ(),
+			updateArgs:  []string{"update"},
+			installArgs: []string{"add", "--no-cache", "py3-pip", "py3-virtualenv"},
+		}, nil
+	}
+	return aiPackageManager{}, fmt.Errorf("apt-get 和 apk 均不可用")
 }
 
 func checkAndInstallQdrant() {
